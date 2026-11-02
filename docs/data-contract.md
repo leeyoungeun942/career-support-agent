@@ -12,7 +12,7 @@
 
 ---
 
-## 1. 직무 게이트 결과 (`job_gate_result.v1`)
+## 1. 직무 게이트 결과 (`job_gate_result.v2`)
 
 정책: [policies/job-gate.md](policies/job-gate.md) 1-5(판정 5종), 5-1(판정 절차), 5-4(판정 결과 기록)
 
@@ -24,7 +24,7 @@
 
 ```json
 {
-  "schema_version": "job_gate_result.v1",
+  "schema_version": "job_gate_result.v2",
   "job_id": "wanted-393719",
   "desired_family": "JF_SERVICE_PLANNING",
   "result": "match",
@@ -32,7 +32,7 @@
   "reason_code": null,
   "warnings": [],
   "summary": "공통을 뺀 업무 2개 중 2개가 서비스기획",
-  "proceed_to_eligibility": true,
+  "ranking_group": "primary",
   "display_flag": null,
   "detail": {
     "ended_at_step": 6,
@@ -86,7 +86,7 @@
 
 | 칸 | 값 | 설명 |
 |---|---|---|
-| `schema_version` | `job_gate_result.v1` | 형식 버전 |
+| `schema_version` | `job_gate_result.v2` | 형식 버전. v1은 받지 않는다 (아래 "변경 이력과 이전 방법") |
 | `job_id` | 문자열 | 공고 ID. 예: `wanted-393719` |
 | `desired_family` | `JF_*` | 사용자가 고른 희망 직무군 |
 | `result` | 아래 1-3 | 판정 결과 |
@@ -94,7 +94,7 @@
 | `reason_code` | 아래 1-3 | `review_needed`일 때만 있다 |
 | `warnings` | 아래 1-3, 여러 개 | 판정은 바꾸지 않는 경고 |
 | `summary` | 문자열 | 코드가 템플릿으로 만든 한 줄 설명 (1-6) |
-| `proceed_to_eligibility` | `true`/`false` | **계산값.** `result`에서 정해진다 (1-4) |
+| `ranking_group` | 아래 1-3 | **계산값.** `result`에서 정해진다 (1-4). 자격요건 평가 여부가 아니라 **정렬 그룹**이다 |
 | `display_flag` | 아래 1-3 또는 `null` | **계산값, 화면 표시용.** 판정 로직은 이 값을 읽지 않는다 |
 | `detail` | 객체 또는 `null` | 근거 확인·테스트용 (1-5) |
 
@@ -111,6 +111,7 @@
 | `result` | `match` / `adjacent` / `mismatch` / `review_needed` / `out_of_scope` | 일치 / 인접 / 불일치 / 검토 필요 / 범위 외 |
 | `reason_code` | `insufficient_info` / `no_core_tasks` / `mixed_job` / `title_task_conflict` | 정보 부족 / 핵심 업무 없음 / 혼합 직무 / 직무명-업무 충돌 |
 | `warnings` | `title_differs` / `category_differs` / `unconfirmed_mapping` | 직무명 차이 / 대분류 차이 / 미확정 분류 사용 |
+| `ranking_group` | `primary` / `job_mismatch` / `out_of_scope` | 상위 / 직무 불일치 / 범위 외 |
 | `display_flag` | `job_scope_differs` / `job_needs_check` | 직무 범위 차이 / 직무 확인 필요 |
 | 업무 항목 라벨 | `JF_*` / `common` / `out_of_scope` / `mixed` | 직무군 이름 / 공통 / 범위외 / 혼합 |
 | `source`, `decided_by` | `rule` / `ai` | 규칙 / AI |
@@ -123,19 +124,21 @@
 | 4. 핵심 직무군 결정 | `no_core_tasks`, 그다음 `mixed_job` |
 | 5. 직무명·대분류 대조 | `title_task_conflict` |
 
-### 1-4. 자격요건 평가 진행 여부
+### 1-4. 정렬 그룹
 
-`proceed_to_eligibility`와 `display_flag`는 `result`에서만 계산한다. 그래서 `result: mismatch`인데 `proceed_to_eligibility: true`처럼 서로 맞지 않는 값은 생길 수 없다.
+**자격요건 평가는 모든 공고가 받는다.** 게이트 결과는 평가 여부를 정하지 않고 **정렬 그룹**만 정한다. `ranking_group`과 `display_flag`는 `result`에서만 계산한다. 그래서 `result: mismatch`인데 `ranking_group: primary`처럼 서로 맞지 않는 값은 생길 수 없다.
 
-| `result` | `proceed_to_eligibility` | `display_flag` | 목록에서 |
+최종 정렬은 항상 `ranking_group` → 자격요건 `verdict` → 적합성 점수 순서다. 뒤 기준은 앞 기준을 넘지 못한다. 그룹 순서는 `primary` → `job_mismatch` → `out_of_scope`이고 `out_of_scope`가 맨 아래다.
+
+| `result` | `ranking_group` | `display_flag` | 목록에서 |
 |---|---|---|---|
-| `match` | `true` | 없음 | 정상 평가 |
-| `adjacent` | `true` | `job_scope_differs` | 정상 평가 + "직무 범위 차이" 표시 |
-| `review_needed` | `true` | `job_needs_check` | 정상 평가 + "직무 확인 필요" 표시 |
-| `mismatch` | `false` | 없음 | 직무 불일치 그룹 (맨 아래) |
-| `out_of_scope` | `false` | 없음 | 하위 그룹, 불일치와 구분해 표시 |
+| `match` | `primary` | 없음 | 상위 그룹 |
+| `adjacent` | `primary` | `job_scope_differs` | 상위 그룹 + "직무 범위 차이" 표시 |
+| `review_needed` | `primary` | `job_needs_check` | 상위 그룹 + "직무 확인 필요" 표시 |
+| `mismatch` | `job_mismatch` | 없음 | 직무 불일치 그룹. 자격요건 결과는 "참고용 평가" |
+| `out_of_scope` | `out_of_scope` | 없음 | 맨 아래 그룹, 불일치와 구분해 표시. 자격요건 결과는 "참고용 평가" |
 
-`mismatch`와 `out_of_scope` 공고도 **지우지 않는다.** 자격요건 평가만 하지 않고 하위 그룹에 남긴다. 사용자가 상위로 옮기면 그때 평가한다.
+`mismatch`와 `out_of_scope` 공고도 **지우지 않는다.** 자격요건 평가를 받고 아래 그룹에 남는다. 이 그룹의 평가 결과는 지원 추천이 아니라 참고용이다.
 
 ### 1-5. `detail`
 
@@ -199,3 +202,28 @@
 ## 2. 자격요건 평가 결과
 
 정책 문서([policies/eligibility.md](policies/eligibility.md)) 검토 뒤에 정한다.
+
+---
+
+## 변경 이력과 이전 방법
+
+### `job_gate_result.v1` → `v2` (2026-11-02)
+
+| 바뀐 것 | 내용 |
+|---|---|
+| 이유 | 모든 공고에 자격요건 평가를 하기로 해서, "평가 진행 여부"가 항상 `true`가 되었다. 게이트가 정하는 것은 정렬 그룹뿐이다 |
+| 지운 칸 | `proceed_to_eligibility` |
+| 새 칸 | `ranking_group` (`primary` / `job_mismatch` / `out_of_scope`). `result`에서 계산한다 |
+| `schema_version` | `job_gate_result.v2` |
+
+**이전 계획** (저장소와 이전 작업 폴더를 확인함, 2026-11-02)
+
+| 사용처 | 현황 | 조치 |
+|---|---|---|
+| 런타임 소비자 (pipeline, agents, rules) | 없음. 파일이 비어 있다 | 없음 |
+| `core/schemas.py`, `tests/test_schemas_job_gate.py` | v1을 썼다 | v2로 바꿨다 |
+| 이 문서 1-1 예시 JSON | v1이었다 | v2 예시로 바꿨다 |
+| 저장된 v1 결과 파일·fixture | 없음 (`data/raw/eval_cases.json`은 정답 형식이고 게이트 결과 형식이 아니다) | 없음 |
+| 이전 작업 폴더 `3.spec/job_gate.py` | `proceed_to_eligibility`를 쓰지 않는다 | 이식할 때 v2로 출력한다 |
+
+소비자가 없으므로 **하위 호환 변환기는 만들지 않는다.** v1 입력이 들어오면 `schema_version` 검사에서 오류가 난다. 이것은 의도한 동작이다.

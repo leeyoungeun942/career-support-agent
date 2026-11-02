@@ -1,8 +1,8 @@
-"""job_gate_result.v1 형식 검증 (docs/data-contract.md 1장)."""
+"""job_gate_result.v2 형식 검증 (docs/data-contract.md 1장)."""
 import pytest
 from pydantic import ValidationError
 
-from core.schemas import DISPLAY_LABELS, GateResultCode, JobGateResult
+from core.schemas import DISPLAY_LABELS, RANKING_GROUP, GateResultCode, JobGateResult
 
 VERSIONS = {"config_version": "2026-11-02.1", "policy_revised": "2026-11-02", "map_modified": "2026-10-27"}
 ITEM_TEXT = "자사 SaaS 서비스 로드맵 수립 및 유관 조직 요구사항 조율"
@@ -19,25 +19,31 @@ def make(result, **kw):
     return JobGateResult(**base)
 
 
-@pytest.mark.parametrize("result,proceed,flag", [
-    ("match", True, None),
-    ("adjacent", True, "job_scope_differs"),
-    ("review_needed", True, "job_needs_check"),
-    ("mismatch", False, None),
-    ("out_of_scope", False, None),
+@pytest.mark.parametrize("result,group,flag", [
+    ("match", "primary", None),
+    ("adjacent", "primary", "job_scope_differs"),
+    ("review_needed", "primary", "job_needs_check"),
+    ("mismatch", "job_mismatch", None),
+    ("out_of_scope", "out_of_scope", None),
 ])
-def test_derived_fields(result, proceed, flag):
+def test_derived_fields(result, group, flag):
     r = make(result)
-    assert r.proceed_to_eligibility is proceed
+    assert r.ranking_group == group
     assert r.display_flag == flag
     dumped = r.model_dump()
-    assert dumped["proceed_to_eligibility"] is proceed
-    assert dumped["schema_version"] == "job_gate_result.v1"
+    assert dumped["ranking_group"] == group
+    assert "proceed_to_eligibility" not in dumped
+    assert dumped["schema_version"] == "job_gate_result.v2"
 
 
 def test_derived_fields_cannot_be_overridden_by_input():
-    r = JobGateResult.model_validate({**make("mismatch").model_dump(), "proceed_to_eligibility": True})
-    assert r.proceed_to_eligibility is False
+    r = JobGateResult.model_validate({**make("mismatch").model_dump(), "ranking_group": "primary"})
+    assert r.ranking_group == "job_mismatch"
+
+
+def test_v1_input_rejected():
+    with pytest.raises(ValidationError):
+        JobGateResult.model_validate({**make("match").model_dump(), "schema_version": "job_gate_result.v1"})
 
 
 @pytest.mark.parametrize("kw", [
@@ -91,6 +97,10 @@ def test_bad_item_label_rejected():
     d["items"][0]["label"] = "공통"  # 저장 형식은 영어 코드만 허용한다
     with pytest.raises(ValidationError):
         make("match", detail=d)
+
+
+def test_ranking_groups_have_display_labels():
+    assert set(RANKING_GROUP.values()) <= set(DISPLAY_LABELS)
 
 
 def test_result_codes_have_display_labels():

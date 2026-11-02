@@ -9,10 +9,10 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field, model_validator
 
 # =====================================================================
-# 직무 게이트 결과 (job_gate_result.v1)
+# 직무 게이트 결과 (job_gate_result.v2)
 # =====================================================================
 
-GATE_SCHEMA_VERSION = "job_gate_result.v1"
+GATE_SCHEMA_VERSION = "job_gate_result.v2"
 
 # 판정 결과 5종 (job-gate.md 1-5)
 GateResultCode = Literal["match", "adjacent", "mismatch", "review_needed", "out_of_scope"]
@@ -25,6 +25,9 @@ WarningCode = Literal["title_differs", "category_differs", "unconfirmed_mapping"
 
 # 화면 표시용. 판정 로직은 이 값을 읽지 않는다
 DisplayFlag = Literal["job_scope_differs", "job_needs_check"]
+
+# 정렬 그룹. 순서는 primary → job_mismatch → out_of_scope (맨 아래)
+RankingGroup = Literal["primary", "job_mismatch", "out_of_scope"]
 
 # 라벨을 누가 정했는가
 LabelSource = Literal["rule", "ai"]
@@ -46,13 +49,13 @@ GATE_STEPS = {
     6: "desired_job_comparison",  # 희망 직무와 비교
 }
 
-# 판정 결과 → 자격요건 평가 진행 여부. 결과에서만 계산한다 (직접 입력하지 않음)
-PROCEED_TO_ELIGIBILITY: dict[str, bool] = {
-    "match": True,
-    "adjacent": True,
-    "review_needed": True,
-    "mismatch": False,
-    "out_of_scope": False,
+# 판정 결과 → 정렬 그룹. 결과에서만 계산한다 (직접 입력하지 않음). 자격요건 평가는 모든 공고가 받는다
+RANKING_GROUP: dict[str, RankingGroup] = {
+    "match": "primary",
+    "adjacent": "primary",
+    "review_needed": "primary",
+    "mismatch": "job_mismatch",
+    "out_of_scope": "out_of_scope",
 }
 
 # 판정 결과 → 화면 표시 (1-5 후속 처리)
@@ -80,6 +83,8 @@ DISPLAY_LABELS = {
     "unconfirmed_mapping": "미확정 분류 사용",
     "job_scope_differs": "직무 범위 차이",
     "job_needs_check": "직무 확인 필요",
+    "primary": "상위",
+    "job_mismatch": "직무 불일치",
     "common": "공통",
     "mixed": "혼합",
 }
@@ -185,7 +190,7 @@ class GateDetail(BaseModel):
 class JobGateResult(BaseModel):
     """공고 1건의 직무 게이트 결과."""
 
-    schema_version: Literal["job_gate_result.v1"] = GATE_SCHEMA_VERSION
+    schema_version: Literal["job_gate_result.v2"] = GATE_SCHEMA_VERSION
     job_id: str
     desired_family: str = Field(description="희망 직무군 ID (JF_*)")
     result: GateResultCode
@@ -199,8 +204,8 @@ class JobGateResult(BaseModel):
 
     @computed_field
     @property
-    def proceed_to_eligibility(self) -> bool:
-        return PROCEED_TO_ELIGIBILITY[self.result]
+    def ranking_group(self) -> RankingGroup:
+        return RANKING_GROUP[self.result]
 
     @computed_field
     @property
