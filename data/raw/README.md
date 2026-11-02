@@ -1,0 +1,9 @@
+# data/raw
+
+이 폴더에는 채용공고 원문 데이터를 넣는다. 내용은 git에 올라가지 않는다(`.gitignore`).
+파일은 팀 Drive 폴더 `career-support-agent-data`에서 받아 이 폴더에 넣는다.
+
+- wanted_jds.json: 원티드 공고 60건
+- eval_cases.json: 항목 분리본과 정답(개발셋·확인셋)
+
+이 폴더의 파일을 다른 곳으로 옮겨 커밋하지 않는다.

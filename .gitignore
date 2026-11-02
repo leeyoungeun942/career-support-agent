@@ -1,0 +1,27 @@
+# 환경·비밀
+.env
+*.env
+!.env.example
+
+# 원티드 공고 원문 (저작권·약관 문제로 저장소에 올리지 않음. Drive로 공유)
+data/raw/*
+!data/raw/README.md
+data/sample-jobs/*
+!data/sample-jobs/.gitkeep
+
+# 지원자 개인정보
+data/profiles/
+*.private.*
+
+# 파이썬
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 에디터·OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
