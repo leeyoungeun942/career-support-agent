@@ -1,6 +1,6 @@
 """에이전트 간 공통 데이터 형식.
 
-- 형식의 설명과 근거는 docs/data-contract.md에 있다. 이 파일과 문서가 다르면 문서를 먼저 고친다.
+- 형식의 설명과 근거는 docs/data-contract.md에 있다. 이 파일과 문서가 다르면 이 파일을 문서에 맞춘다. 문서가 미확정이거나 모순이면 먼저 문서를 확정한 뒤 맞춘다.
 - 판정 값은 영어 코드로 저장하고, 화면에는 DISPLAY_LABELS의 한글로 보여 준다.
 """
 from datetime import date

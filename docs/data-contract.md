@@ -1,6 +1,6 @@
 # 데이터 계약: Agent끼리 주고받는 형식
 
-> 코드: [core/schemas.py](../core/schemas.py). 이 문서와 코드가 다르면 문서를 먼저 고친다.
+> 코드: [core/schemas.py](../core/schemas.py). 이 문서와 코드가 다르면 코드를 이 문서에 맞춘다. 문서가 미확정이거나 모순이면 먼저 문서를 확정한 뒤 맞춘다.
 > 테스트: [tests/test_schemas_job_gate.py](../tests/test_schemas_job_gate.py)
 
 ## 공통 원칙
