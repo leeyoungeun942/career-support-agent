@@ -24,3 +24,11 @@
 ## 설정
 
 `.env.example`을 `.env`로 복사하고 키를 넣는다. `.env`는 올리지 않는다.
+
+## 작업 규칙
+
+- `main`에는 직접 push하지 않는다. 모든 변경은 `feature/...` 브랜치에서 작업하고, 그 브랜치에서 `main`으로 Pull Request를 만들어 합친다.
+- 브랜치 담당: `feature/job-gate`, `feature/eligibility`(이영은), `feature/cover-letter`(팀원).
+- PR은 다른 사람이 한 번 확인한 뒤 Merge한다.
+- 작업을 시작하기 전에 `main`의 최신 내용을 내 브랜치로 가져온다: `git checkout 내브랜치` → `git pull origin main`.
+- `data/raw/`, `.env`, 지원자 개인정보는 커밋하지 않는다.
