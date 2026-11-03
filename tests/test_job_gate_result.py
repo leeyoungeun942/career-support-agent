@@ -5,25 +5,15 @@
 """
 import json
 from datetime import date
-from pathlib import Path
-
-import pytest
 
 from core import job_gate as gate
 from core import job_gate_config as cfg
+from gate_data import RAW_CASES, load_expected, needs_raw
 from core.job_gate_result import build_gate_result, judge_posting, make_summary
 from core.schemas import DISPLAY_LABELS, JobGateResult
 
 SP, PM, DEV = "JF_SERVICE_PLANNING", "JF_PROJECT_MGMT", "JF_DEV"
 COMMON, MIXED, OOS = "common", "mixed", "out_of_scope"
-
-RAW_CASES = Path(__file__).resolve().parents[1] / "data" / "sample-jobs" / "gate_sample_cases.json"
-EXPECTED = Path(__file__).parent / "fixtures" / "job_gate_sample_expected.json"
-needs_raw = pytest.mark.skipif(
-    not RAW_CASES.exists(),
-    reason="샘플 공고 원문이 없어 건너뜀: data/sample-jobs/gate_sample_cases.json (팀 Drive에서 받아 넣는다. 커밋하지 않는 파일)",
-)
-
 
 def posting(n, title="담당자"):
     return {"job_title": title, "position": "", "items": [{"text": f"업무 {i}를 처리합니다"} for i in range(n)]}
@@ -252,7 +242,7 @@ SAMPLE_SUMMARIES = {
 @needs_raw
 def test_sample_cases_as_v2_results():
     """7-1의 6건이 v2 결과로 만들어지고, 판정·그룹·요약·근거가 기대와 같다."""
-    desired, expected = json.loads(EXPECTED.read_text(encoding="utf-8"))["desired_family"], json.loads(EXPECTED.read_text(encoding="utf-8"))["cases"]
+    desired, expected = load_expected()
     raw = {c["no"]: c for c in json.loads(RAW_CASES.read_text(encoding="utf-8"))["cases"]}
     for exp in expected:
         case = raw[exp["no"]]

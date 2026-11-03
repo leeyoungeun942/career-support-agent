@@ -68,7 +68,7 @@ def word_starts(text):
         if ch.isspace():
             boundary = True
             continue
-        flags.append(boundary)
+        flags.extend([boundary] * len(ch.lower()))  # norm()이 소문자로 바꿀 때 글자 수가 늘면(İ 등) 같은 경계를 쓴다
         boundary = not ch.isalnum()
     return flags
 

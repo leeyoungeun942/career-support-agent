@@ -49,11 +49,21 @@ def convert_answer(answer):
     return a
 
 
+def gradable(case):
+    """채점 대상: 정답이 있고, 보류가 아니고, review_status가 approved다."""
+    answer = case["answer"]
+    return bool(answer) and not answer.get("hold") and answer.get("review_status") == "approved"
+
+
 def load(set_name, path=None):
     data = json.loads(Path(path or CASES_JSON).read_text(encoding="utf-8"))
-    cases = [c for c in data["cases"] if set_name in ("all", c["set"])]
-    skipped = [c for c in cases if not c["answer"] or c["answer"].get("hold") or c["answer"]["review_status"] != "approved"]
-    cases = [{**c, "answer": convert_answer(c["answer"])} for c in cases if c not in skipped]
+    selected = [c for c in data["cases"] if set_name in ("all", c["set"])]
+    skipped = [c for c in selected if not gradable(c)]
+    cases = [{**c, "answer": convert_answer(c["answer"])} for c in selected if gradable(c)]
+    for c in cases:  # 정답이 항목마다 하나씩 있어야 한다. 어긋나면 나중에 IndexError 대신 어느 공고인지 알려 준다
+        kept = sum(1 for it in c["items"] if not it.get("exclude"))
+        if len(c["answer"]["item_labels"]) != kept:
+            raise ValueError(f"정답 파일 오류: 공고 {c['id']}의 item_labels {len(c['answer']['item_labels'])}개, 업무 항목 {kept}개")
     return data["desired_family"], cases, skipped
 
 

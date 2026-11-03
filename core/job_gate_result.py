@@ -42,15 +42,11 @@ def _name(family_id):
 def make_summary(raw):
     """data-contract 1-6 템플릿. 판정 값만 넣는다."""
     result, desired, core = raw["result"], raw["desired_family"], raw["core_family"]
-    if result == "match":
+    if result in CORE_RESULTS:
         ratio = _ratio(raw["core_ratio"])
-        return f"공통을 뺀 업무 {ratio.total}개 중 {ratio.count}개가 {_name(desired)}"
-    if result == "adjacent":
-        ratio = _ratio(raw["core_ratio"])
-        return f"핵심 직무는 {_name(core)}({ratio.count}/{ratio.total})이며 {_name(desired)} 업무도 있음"
-    if result == "mismatch":
-        ratio = _ratio(raw["core_ratio"])
-        return f"공통을 뺀 업무 {ratio.total}개 중 {ratio.count}개가 {_name(core)}"
+        if result == "adjacent":
+            return f"핵심 직무는 {_name(core)}({ratio.count}/{ratio.total})이며 {_name(desired)} 업무도 있음"
+        return f"공통을 뺀 업무 {ratio.total}개 중 {ratio.count}개가 {_name(desired if result == 'match' else core)}"
     if result == "review_needed":
         return f"직무 확인 필요: {DISPLAY_LABELS[raw['reason_code']]}"
     oos = _ratio(raw["oos_items"])
@@ -156,5 +152,8 @@ def build_gate_result(job_id, raw, with_detail=True, ai_model=None, prompt_versi
 
 
 def judge_posting(job_id, posting, desired_family, ai_judge, dic=None, **options):
-    """공고 1건을 판정해 JobGateResult로 돌려준다. options는 build_gate_result의 with_detail, ai_model, prompt_version."""
+    """공고 1건을 판정해 JobGateResult로 돌려준다. options는 build_gate_result의 with_detail, ai_model, prompt_version.
+
+    여러 공고를 돌릴 때는 dic(gate.Dictionary())을 만들어 공유한다. 넘기지 않으면 공고마다 매핑표를 다시 읽는다(약 3ms).
+    """
     return build_gate_result(job_id, gate.judge(posting, desired_family, ai_judge, dic), **options)

@@ -11,28 +11,14 @@
 import json
 import re
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
 import policy_docs as pd
 from core import job_gate as gate
+from gate_data import RAW_CASES, load_expected, needs_raw
 from core import job_gate_config as cfg
 from core.schemas import DISPLAY_LABELS
-
-RAW_CASES = Path(__file__).resolve().parents[1] / "data" / "sample-jobs" / "gate_sample_cases.json"
-EXPECTED = Path(__file__).parent / "fixtures" / "job_gate_sample_expected.json"
-
-needs_raw = pytest.mark.skipif(
-    not RAW_CASES.exists(),
-    reason="샘플 공고 원문이 없어 건너뜀: data/sample-jobs/gate_sample_cases.json (팀 Drive에서 받아 넣는다. 커밋하지 않는 파일)",
-)
-
-
-def load_expected():
-    data = json.loads(EXPECTED.read_text(encoding="utf-8"))
-    return data["desired_family"], data["cases"]
-
 
 def load_cases():
     """원문(로컬 파일)과 기대 판정(fixture)을 번호로 짝짓는다."""
@@ -155,6 +141,21 @@ def test_word_start_boundary():
     assert has("스트리밍", "표시 방식 (스트리밍, 타이핑 효과 등)")  # 괄호 뒤는 새 단어
     assert has("서비스기획", "서비스 기획에 반영")                  # 조사가 붙은 단어 끝은 따지지 않는다
     assert not has("MD", "AMD 칩 개발")                              # 영문 단어 중간
+
+
+@pytest.mark.parametrize("text", [
+    "İstanbul 개발", "İİİİ 개발", "Straße 기획", "ǅ 테스트", "서비스\u00a0기획", "서비스\u3000기획", "a\x1cb", "a\u200bb", "ΑΣ 기획", "  앞뒤 공백  ", "", "A/B 테스트",
+])
+def test_word_start_flags_align_with_the_normalized_text(text):
+    """norm()이 소문자로 바꿀 때 글자 수가 늘어도(İ -> i̇) 경계 표시와 길이가 같아야 한다. 어긋나면 find_term이 IndexError를 낸다."""
+    assert len(gate.word_starts(text)) == len(gate.norm(text))
+
+
+def test_find_term_does_not_crash_on_characters_that_expand_when_lowercased():
+    text = "İİİİ 개발 업무"
+    assert gate.find_term(gate.norm("개발"), gate.norm(text), gate.word_starts(text))  # 공백 뒤 새 단어의 시작
+    assert not gate.find_term(gate.norm("발업"), gate.norm(text), gate.word_starts(text))  # 단어 중간은 여전히 아니다
+    assert gate.find_term(gate.norm("i"), gate.norm("İstanbul"), gate.word_starts("İstanbul"))  # 첫 글자의 확장 중 첫 글자는 단어 시작
 
 
 def test_item_label_majority():
