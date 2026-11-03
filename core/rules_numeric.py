@@ -16,6 +16,7 @@ from core.schemas import (
     ProfileEvidence,
     RequirementResult,
     month_index,
+    normalize_major,
 )
 
 # =====================================================================
@@ -210,15 +211,6 @@ def judge_education(req: JobRequirement, profile: EligibilityProfile) -> Require
         req, "not_met", "below_threshold", compared=shortfall,
         evidence=_education_evidence(profile, graduated[0]) if graduated else (),
     )
-
-
-def normalize_major(name: str) -> str:
-    """전공명 정리 (7-2): 공백 제거, 끝의 "전공" 제거, "학과"·"학부"는 "학"만 남긴다. 그 밖의 유사성은 판단하지 않는다."""
-    name = "".join(name.split())
-    name = name.removesuffix("전공")
-    if name.endswith(("학과", "학부")):
-        name = name[:-1]
-    return name
 
 
 def judge_major(req: JobRequirement, profile: EligibilityProfile) -> RequirementResult:

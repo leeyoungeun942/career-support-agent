@@ -95,7 +95,7 @@
 | `skills_denied[]` | 사용자 입력 | "없음" 응답 → `user_denied` (3장). 칸이 비어 있으면 "모름"이다 |
 | `certificates[]`, `other_qualifications[]` | 사용자 입력 | 자격증·면허, 그 밖의 요건 (8장) |
 
-- **`Experience.category`에는 직무군 ID(`JF_*`)를 쓴다.** 직무 게이트와 자격요건 평가가 같은 직무군 분류표를 공유한다 ([job-family-definition.md](job-family-definition.md)).
+- **`Experience.category`에는 직무군 ID(`JF_*`)를 쓴다.** `JF_`로 시작하지 않는 값은 프로필 입력 오류로 거부한다(직무군 데이터가 잘못된 것을 "경력 부족"(`not_met`)으로 바꾸지 않는다). 모르면 `null`이다. 직무 게이트와 자격요건 평가가 같은 직무군 분류표를 공유한다 ([job-family-definition.md](job-family-definition.md)).
 - 입력 안내 문구: "모르면 억지로 채우지 말고 비워 두거나 '확인 필요'로 입력하세요." 0-3 원칙과 같다.
 - 쓰지 않는 칸: `context`, `problem_or_goal`, `team`, `metrics`, `learning`, `evidence_links`는 적합성 평가와 자기소개서 쪽 몫이다.
 
@@ -374,7 +374,7 @@
 1. 공백을 지우고, 끝의 "전공"을 뗀 뒤, 끝이 "학과"·"학부"이면 "과"·"부"를 뗀다(학 글자는 남긴다). 예: "경제 학과" → "경제학", "경제학과 전공" → "경제학", "컴퓨터공학부" → "컴퓨터공학". 지원자 전공과 공고 `major_names`에 같은 정리를 한다
 2. 정리한 이름을 공고의 `major_names`와 **정확히** 비교한다.
 3. 복수전공·부전공 목록에서도 같은 비교를 한다.
-4. 정리한 결과가 빈 이름(공백만 있거나 "전공"뿐인 이름)은 전공으로 보지 않는다. 지원자 쪽이면 입력하지 않은 것(`no_profile_info`)으로, 공고 쪽이면 비교 대상에서 뺀다.
+4. 정리한 결과가 빈 이름(공백만 있거나 "전공"뿐인 이름)은 전공으로 보지 않는다. 지원자 쪽이면 입력하지 않은 것(`no_profile_info`)으로, 공고 쪽이면 비교 대상에서 뺀다. 공고의 `major_names`가 **모두** 빈 이름이면 비교할 전공명이 없는 것이므로 판정하지 않고 요건 입력 오류로 거부한다(요건 추출이 전공명을 뽑지 못한 경우이며, 추출 단계가 `partial_extraction` 등으로 처리한다).
 
 "컴퓨터과학"과 "컴퓨터공학"이 같은지 같은 판단은 하지 않는다. 사용자에게 "이 공고는 컴퓨터공학 전공을 요구합니다. 컴퓨터과학 전공으로 지원할 수 있는지 공고를 확인해 보세요"처럼 묻는다.
 
@@ -462,17 +462,17 @@
 | 4. 상태 검증 | **코드** | LLM이 `not_met`을 내면 코드가 `needs_check`로 되돌린다. `not_met`은 numeric 값 비교와 `user_denied`만 허용한다. 되돌릴 때의 사유는 LLM이 낸 확인 필요 사유가 유효하면 그대로 쓰고, 없으면 `scope_unclear`다. `interpretation_note`에 "AI가 미충족으로 판단해 확인 필요로 조정"을 남긴다. 사용자가 정한 `user_denied`는 되돌리지 않는다. 이 검증은 LLM의 원시 출력에 스키마 검증 **전에** 적용한다 |
 | 5. 종합 판정·요약 | **코드** | `any_of` 항목 결과 합치기(2장), `verdict`, 결정적 요건, `needs_check_count`, `summary` |
 
-- **상태 검증의 범위 (4단계).** `not_met`을 그대로 두는 경우는 둘뿐이다: `numeric` 요건에서 `status_decided_by=rule`일 때, `skill`·`qualitative` 요건에서 `status_decided_by=user`일 때. 그 밖의 `not_met`(AI가 냈거나 판정 주체가 비어 있거나, `numeric`인데 AI가 판정한 것)은 모두 `needs_check`로 되돌린다.
+- **상태 검증의 범위 (4단계).** 4단계는 LLM의 원시 출력(딕셔너리)에만 적용한다. 원시 출력은 AI가 낸 것이므로 안에 적힌 `status_decided_by`를 믿지 않고 모두 `ai`로 덮고(`any_of` 항목 포함, 상태가 `null`인 것은 제외), `not_met`은 예외 없이 `needs_check`로 되돌린다. 코드가 판정한 `numeric`의 `not_met`(`below_threshold`)과 사용자가 정한 `user_denied`는 이 검사를 거치지 않는다. 앞의 것은 코드가 만든 결과 객체이고, 뒤의 것은 사용자 답변을 받은 쪽이 검증된 결과 객체(`status_decided_by=user`)로 만들어 넘긴다. 이 검사를 단독으로 불러도 판정 주체를 믿지 않는다.
   - 되돌린 결과의 `status_decided_by`는 `ai`다. 사유는 LLM이 낸 값이 확인 필요 사유(3-1)이면 그대로, 아니면(`below_threshold`, `user_denied`, 빈 값, 모르는 값) `scope_unclear`다.
   - `any_of` 요건은 항목마다 같은 검사를 한다. 하나라도 되돌리면 요건의 `interpretation_note`에 한 번 남긴다. `interpretation_note`가 이미 있으면 뒤에 ` / `로 이어 쓴다.
-  - 입력 딕셔너리를 바꾸지 않고 새 딕셔너리를 돌려준다. 상태가 `null`(`preference`), `met`, `needs_check`인 결과는 손대지 않는다.
+  - 입력 딕셔너리를 바꾸지 않고 새 딕셔너리를 돌려준다. 상태가 `null`(`preference`), `met`, `needs_check`인 결과는 상태와 사유를 손대지 않는다(판정 주체만 `ai`로 덮는다).
 - **`any_of` 합치기 (5단계).** 결정 항목(data-contract 2-4)의 `status`, `reason_code`, `evidence_checked_by`, `status_decided_by`를 요건 전체 값으로 옮기고, `job_quote`, `profile_evidence`, `compared`, `question_for_user`는 비운다. 항목의 `item_index`가 요건의 `items`와 1:1이 아니거나 `combine`이 `any_of`가 아니면 오류다.
 - **결과 조립 (코드).** 코드는 위 1~5단계를 이어서 공고 1건의 결과를 만든다. 입력은 같은 공고의 게이트 결과, 프로필, 요건 목록(1단계 출력), `skill`·`qualitative` 요건의 판정(3단계 출력), `extraction_issues`다.
   - `job_id`와 `gate_ranking_group`은 게이트 결과에서 복사하고, `as_of_month`는 프로필에서 가져온다.
   - 요건 유형마다 판정하는 쪽이 다르다: `numeric`은 코드가 판정한다(2단계). `preference`는 `status=null`로 결과에만 남긴다. `skill`·`qualitative`는 밖에서 받은 판정을 쓴다.
   - 밖에서 받는 판정은 요건마다 하나씩 있어야 한다. **빠진 요건이 있으면 오류**다(확인하지 않은 요건을 조용히 `needs_check`로 채우지 않는다). `numeric`·`preference` 요건이나 없는 요건의 판정을 받으면 오류다.
   - 받은 판정이 LLM의 원시 출력(딕셔너리)이면 4단계(되돌림)를 적용한 뒤 스키마 검증을 하고, `any_of`는 항목을 합친다(5단계). 이미 검증된 결과 객체이면 그대로 쓴다. `requirement_id`가 다르면 오류다.
-  - **원시 딕셔너리는 LLM이 낸 것으로 본다.** 안에 적힌 `status_decided_by`는 믿지 않고 모두 `ai`로 덮는다(`any_of` 항목 포함). LLM이 스스로 `user`라고 적어 `not_met`을 살리는 길을 막으려는 것이다. 사용자가 정한 판정(`user_denied`)은 사용자 답변을 받은 쪽이 검증된 결과 객체(`status_decided_by=user`)로 만들어 넘긴다.
+  - **원시 딕셔너리는 4단계를 거친다.** LLM이 스스로 `user`라고 적어 `not_met`을 살리는 길을 막으려고 판정 주체를 `ai`로 덮는다(위 "상태 검증의 범위"). 사용자가 정한 판정(`user_denied`)은 검증된 결과 객체로 넘긴다.
   - 요건 `id`가 겹치면 오류다(판정이 엉뚱한 요건에 붙는 것을 막는다).
   - 만들기 전에 모든 `profile_evidence`를 프로필 원문과 대조한다(위 "프로필 근거 검증"). 어긋나면 결과를 만들지 않는다.
 - **종합 판정 규칙:** `level=required`이고 `type≠preference`인 요건만 본다.
@@ -496,6 +496,7 @@
 - **정렬 순서:** `ranking_group` → `verdict` → 적합성 점수다. 뒤 기준은 앞 기준을 넘지 못한다. 점수가 자격요건 결과를 덮어쓰지 않는다.
   - `ranking_group`: `primary` → `job_mismatch` → `out_of_scope` (맨 아래)
   - `verdict`: `eligible` → `conditional` → `not_eligible`
+  - **점수의 범위와 의미는 적합성 평가 정책(fit-evaluation.md)에서 정한다.** 범위(0~100 여부), 정수·실수, 음수 허용, 점수 없음의 의미(아직 계산하지 않음과 계산에 실패함의 구분)가 그 대상이다. 이 코드는 유한한 숫자만 받고 범위를 제한하지 않는다.
   - **적합성 점수가 없으면** (적합성 평가가 아직 없거나 계산하지 않은 공고) 같은 `ranking_group`·`verdict` 안에서 점수가 있는 공고가 먼저 오고, 점수가 없는 공고끼리는 입력 순서를 유지한다. 점수가 같을 때도 입력 순서를 유지한다(안정 정렬). 점수는 높은 쪽이 먼저다.
   - **코드의 입력.** 자격요건 결과 목록, 같은 공고들의 게이트 결과 목록, 점수(`job_id` → 점수, 선택)를 받는다. 점수는 판정 칸이 아니라 정렬에만 쓰는 값이다. 코드는 점수를 계산하지 않는다.
   - **정렬하기 전에 게이트와 맞춰 본다 (data-contract 2-2).** 모든 결과에 같은 `job_id`의 게이트 결과가 있어야 하고, 결과의 `gate_ranking_group`이 게이트 결과의 `ranking_group`과 같아야 한다. 어긋나면 정렬하지 않고 오류를 낸다. 오류에는 `job_id`와 두 값을 적는다.
@@ -704,3 +705,4 @@
 - 2026-11-03: `core/rules.py` 순위 정렬과 게이트 일치 검사 구현(이슈 #4)을 위한 보완. 14장에 코드의 입력(결과·게이트 결과·점수), 정렬 전 게이트 일치 검사, 오류가 되는 입력
 - 2026-11-03: `core/rules.py` 결과 조립(`build_result`) 구현(이슈 #4)을 위한 보완. 13장에 결과 조립 규칙(입력, 유형별 판정 주체, 빠지거나 잘못된 판정은 오류, 되돌림·합치기·근거 검증 순서)
 - 2026-11-03: 코드 리뷰 반영. 13장 결과 조립에 원시 딕셔너리의 `status_decided_by`를 `ai`로 덮는 규칙과 요건 id 중복 오류. 7-2에 정리 결과가 빈 전공명 처리
+- 2026-11-03: PR #9 코드 리뷰 반영. 1-2에 `Experience.category`가 `JF_*`가 아니면 입력 오류. 7-2에 공고 `major_names`가 모두 빈 이름이면 요건 입력 오류. 13장 상태 검증을 LLM 원시 출력 전용으로 정리(판정 주체를 믿지 않고 `ai`로 덮고 `not_met`은 예외 없이 되돌림, 단독 호출도 동일). 14장에 점수의 범위·의미는 적합성 평가 정책에서 정한다는 문구

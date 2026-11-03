@@ -224,7 +224,7 @@
 | `career_family_basis` | `stated` / `related` | `career_family`가 있을 때만, 그때는 반드시 있다 (정책 4-1) |
 | `min_degree` | `high_school` / `associate` / `bachelor` / `master` / `doctorate` | `education`일 때 반드시 있다 (정책 6장) |
 | `allows_graduating` | `true` / `false` | `education`일 때. 기본값 `false`. 공고에 "졸업 예정자 지원 가능"이 있으면 `true` |
-| `major_names` | 문자열 목록 | `major`일 때 1개 이상 (정책 7장) |
+| `major_names` | 문자열 목록 | `major`일 때 1개 이상. 정리한 뒤(정책 7-2) 빈 이름이 아닌 것이 1개 이상이어야 한다 (정책 7장) |
 | `origin` | `original` / `split` | 기본값 `original`. 한 문장을 나눈 요건은 `split` (정책 10장) |
 | `interpretation_note` | 문자열 또는 `null` | 해석 가정. 예: "연수 표시가 없어 전문학사 이상으로 해석" |
 

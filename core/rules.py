@@ -117,15 +117,6 @@ def rank_jobs(
 # 결과 조립 (eligibility.md 13장 "결과 조립")
 # =====================================================================
 
-def _as_ai_output(raw: dict) -> dict:
-    """원시 딕셔너리는 LLM이 낸 것이라 안에 적힌 판정 주체를 믿지 않고 ai로 덮는다 (13장 결과 조립)."""
-    out = {**raw, "status_decided_by": "ai"} if raw.get("status") is not None else dict(raw)
-    if "item_results" in raw:
-        out["item_results"] = [{**item, "status_decided_by": "ai"} if item.get("status") is not None else item
-                               for item in raw["item_results"]]
-    return out
-
-
 def _injected_result(req: JobRequirement, given: RequirementResult | dict) -> RequirementResult:
     """밖에서 받은 skill·qualitative 판정을 결과 객체로 만든다. 원시 딕셔너리는 되돌림 -> 검증 -> any_of 합치기를 거친다."""
     given_id = given.requirement_id if isinstance(given, RequirementResult) else given.get("requirement_id", req.id)
@@ -133,7 +124,7 @@ def _injected_result(req: JobRequirement, given: RequirementResult | dict) -> Re
         raise ValueError(f"요건 {req.id}: 판정의 requirement_id가 {given_id!r}이다")
     if isinstance(given, RequirementResult):
         return given
-    raw = normalize_ai_result(_as_ai_output({**given, "requirement_id": req.id}), req)
+    raw = normalize_ai_result({**given, "requirement_id": req.id})
     if req.combine == "any_of":
         items = [ItemResult(**item) for item in raw.get("item_results", [])]
         return merge_any_of(req, items, raw.get("interpretation_note"))

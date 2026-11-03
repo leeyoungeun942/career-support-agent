@@ -24,31 +24,27 @@ from core.schemas import (
 NOTE_AI_NOT_MET_ADJUSTED = "AI가 미충족으로 판단해 확인 필요로 조정"
 
 
-def _not_met_allowed(req: JobRequirement, decided_by: str | None) -> bool:
-    """numeric은 코드(rule)가, skill·qualitative는 사용자(user)가 정한 not_met만 인정한다 (3-2, 13장)."""
-    return decided_by == ("rule" if req.type == "numeric" else "user")
-
-
-def _revert_not_met(body: dict, req: JobRequirement) -> tuple[dict, bool]:
-    if body.get("status") != "not_met" or _not_met_allowed(req, body.get("status_decided_by")):
+def _as_ai_body(body: dict) -> tuple[dict, bool]:
+    """판정 칸 1개를 AI가 낸 것으로 다룬다: 판정 주체를 ai로 덮고, not_met은 needs_check로 되돌린다. (결과, 되돌렸는가)"""
+    if body.get("status") is None:  # preference는 판정 대상이 아니다
+        return body, False
+    body = {**body, "status_decided_by": "ai"}
+    if body["status"] != "not_met":
         return body, False
     reason = body.get("reason_code")
-    return {
-        **body,
-        "status": "needs_check",
-        "reason_code": reason if reason in NEEDS_CHECK_REASONS else "scope_unclear",
-        "status_decided_by": "ai",
-    }, True
+    return {**body, "status": "needs_check", "reason_code": reason if reason in NEEDS_CHECK_REASONS else "scope_unclear"}, True
 
 
-def normalize_ai_result(raw: dict, req: JobRequirement) -> dict:
-    """LLM 원시 결과(딕셔너리)의 허용되지 않는 not_met을 needs_check로 되돌린다. 스키마 검증 전에 쓴다 (13장 4단계).
+def normalize_ai_result(raw: dict) -> dict:
+    """LLM 원시 결과(딕셔너리)를 AI가 낸 것으로 다룬다. 스키마 검증 전에 쓴다 (13장 4단계).
 
-    any_of는 항목마다 같은 검사를 하고, 하나라도 되돌리면 요건의 interpretation_note에 남긴다. 입력은 바꾸지 않는다.
+    안에 적힌 status_decided_by는 믿지 않고 ai로 덮고, not_met은 예외 없이 needs_check로 되돌린다.
+    코드가 판정한 결과와 사용자가 정한 판정(user_denied)은 이 함수를 거치지 않고 검증된 결과 객체로 들어온다.
+    any_of는 항목마다 같은 처리를 하고, 하나라도 되돌리면 요건의 interpretation_note에 남긴다. 입력은 바꾸지 않는다.
     """
-    out, changed = _revert_not_met(raw, req)
+    out, changed = _as_ai_body(raw)
     if "item_results" in raw:
-        reverted = [_revert_not_met(item, req) for item in raw["item_results"]]
+        reverted = [_as_ai_body(item) for item in raw["item_results"]]
         out = {**out, "item_results": [item for item, _ in reverted]}
         changed = changed or any(did for _, did in reverted)
     if changed:
