@@ -688,6 +688,8 @@ job_mid_cd,job_mid_name,job_cd,job_name,item_type,mapping_status,job_family_id,c
 
 이 기록은 그대로 테스트 결과가 되고, 제출물 5번(테스트 케이스)에도 쓸 수 있다.
 
+**실행:** 저장소 루트에서 `python -m tools.eval_gate --set dev`(mock, 기본). 실제 AI(`--ai`)는 아직 연결하지 않아 안내만 하고 끝난다(8장 보류). 확인셋(`--set holdout`)은 한 번만 돌리고 결과를 보고 규칙·기준값을 고치지 않는다(6-4). 개발셋 지표는 `tests/test_job_gate_devset.py`가 다시 계산해 6-4 표의 같은 설정값 행과 대조한다. 그래서 설정값을 올리면 개발셋을 다시 돌려 6-4에 행을 추가해야 테스트가 통과한다. mock AI는 `core/job_gate_mock.py`다.
+
 ### 6-4. 검증 결과 기록
 
 원티드 공고 60건(개발셋 30, 확인셋 30)으로 잰다. 정답 데이터와 평가 실행은 검증 도구가 담당한다. 계획: [원티드공고_개발셋_30건_테스트계획.md](../job-gate-test-plan.md).
@@ -961,3 +963,4 @@ AI로 넘어가는 하위 업무는 개발셋 기준 178 → 181개(90% → 92%)
 - 2026-11-03: 코드 이식(이슈 #5)을 위한 보완. 5-4에 핵심 근거를 만드는 규칙 추가(인용은 하위 업무 원문 전체, 판정별 supporting/conflicting, 검토 필요 사유별 missing 고정 문구). 원본 코드가 판정 단위 근거를 만들지 않아 정책이 정하지 않은 부분이었다
 - 2026-11-03: 코드 이식(이슈 #5). 5-3의 기준값 경계 테스트 위치를 `tests/test_job_gate_sample.py`로 바꿈
 - 2026-11-03: 코드 이식(이슈 #5) 완료 표시. 8장 스키마 할 일을 완료로 바꾸고 코드 위치를 `core/job_gate.py`, `core/job_gate_result.py`로 기록. 판정 기록의 버전 날짜(`POLICY_REVISED`, `MAP_MODIFIED`)는 이 문서의 개정 이력과 6-4 표를 따른다
+- 2026-11-03: 평가 도구 이식(이슈 #5). 6-3에 실행 방법과 개발셋 지표 대조 테스트를 적음. 도구는 `tools/eval_gate.py`, mock AI는 `core/job_gate_mock.py`

@@ -139,9 +139,9 @@ def doc_last_revision_date():
     return dates[-1]
 
 
-def doc_latest_validation_row():
-    """job-gate.md 6-4 검증 결과 표의 마지막 행을 {열 이름: 값}으로 (설정값, 매핑표 수정일 등)."""
-    header, last = None, None
+def doc_validation_rows():
+    """job-gate.md 6-4 검증 결과 표의 모든 행을 [{열 이름: 값}]으로 (설정값, 매핑표 수정일, 지표 등)."""
+    header, rows = None, []
     for line in section(POLICY_MD.read_text(encoding="utf-8"), "### 6-4."):
         if not line.startswith("|"):
             continue
@@ -149,8 +149,13 @@ def doc_latest_validation_row():
         if cells[0] == "회차":
             header = cells
         elif header and cells[0].isdigit():
-            last = dict(zip(header, cells))
-    return last
+            rows.append(dict(zip(header, cells)))
+    return rows
+
+
+def doc_latest_validation_row():
+    """6-4 검증 결과 표의 마지막 행."""
+    return doc_validation_rows()[-1]
 
 
 def doc_adjacent_pairs():
