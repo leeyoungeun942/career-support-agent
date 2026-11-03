@@ -218,13 +218,13 @@
 | `combine` | `all` / `any_of` | 기본값 `all`. `any_of`이면 `items`가 있다 (정책 9장) |
 | `items` | 목록 | `any_of`일 때만. 항목마다 `index`(0부터), `text`(요건 `text` 안의 원문) |
 | `numeric_kind` | `career_years` / `education` / `major` | `type=numeric`일 때만, 그때는 반드시 있다 |
-| `min_value` | 0 이상의 수(소수 가능) 또는 `null` | `career_years`일 때. 연 단위. **`0`은 지원에 필요한 최소 경력이 없다는 뜻**이다. 지원자가 신입인지는 판정하지 않는다 (정책 5-1). 신입 지원 경로가 있는 공고("신입 / 경력 N년 이상")도 `0`이고, 경력 기준 N년은 `interpretation_note`에 적는다. `null`은 기준 없음 (정책 5장 "연차 무관") |
+| `min_value` | 0 이상의 유한한 수(소수 가능, 무한대·NaN 불가) 또는 `null` | `career_years`일 때. 연 단위. **`0`은 지원에 필요한 최소 경력이 없다는 뜻**이다. 지원자가 신입인지는 판정하지 않는다 (정책 5-1). 신입 지원 경로가 있는 공고("신입 / 경력 N년 이상")도 `0`이고, 경력 기준 N년은 `interpretation_note`에 적는다. `null`은 기준 없음 (정책 5장 "연차 무관") |
 | `max_value` | 수 또는 `null` | `career_years`일 때. 상한 기록용이고 판정에 쓰지 않는다 (정책 5-3) |
 | `career_family` | `JF_*` 또는 `null` | `career_years`일 때. `null`이면 모든 인턴·경력을 합산한다 (정책 4장) |
 | `career_family_basis` | `stated` / `related` | `career_family`가 있을 때만, 그때는 반드시 있다 (정책 4-1) |
 | `min_degree` | `high_school` / `associate` / `bachelor` / `master` / `doctorate` | `education`일 때 반드시 있다 (정책 6장) |
 | `allows_graduating` | `true` / `false` | `education`일 때. 기본값 `false`. 공고에 "졸업 예정자 지원 가능"이 있으면 `true` |
-| `major_names` | 문자열 목록 | `major`일 때 1개 이상 (정책 7장) |
+| `major_names` | 문자열 목록 | `major`일 때 1개 이상. 정리한 뒤(정책 7-2) 빈 이름이 아닌 것이 1개 이상이어야 한다 (정책 7장) |
 | `origin` | `original` / `split` | 기본값 `original`. 한 문장을 나눈 요건은 `split` (정책 10장) |
 | `interpretation_note` | 문자열 또는 `null` | 해석 가정. 예: "연수 표시가 없어 전문학사 이상으로 해석" |
 

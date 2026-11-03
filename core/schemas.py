@@ -6,7 +6,7 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, StringConstraints, computed_field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, StringConstraints, computed_field, field_validator, model_validator
 
 # =====================================================================
 # 직무 게이트 결과 (job_gate_result.v2)
@@ -349,6 +349,15 @@ ExperienceType = Literal["intern", "full_time", "contract", "project", "activity
 EducationStatus = Literal["enrolled", "graduated", "graduating", "dropped"]
 
 
+def normalize_major(name: str) -> str:
+    """전공명 정리 (eligibility.md 7-2): 공백 제거, 끝의 "전공" 제거, "학과"·"학부"는 "학"만 남긴다. 그 밖의 유사성은 판단하지 않는다."""
+    name = "".join(name.split())
+    name = name.removesuffix("전공")
+    if name.endswith(("학과", "학부")):
+        name = name[:-1]
+    return name
+
+
 class RequirementItem(BaseModel):
     """combine=any_of 요건의 항목 1개."""
 
@@ -366,8 +375,8 @@ class JobRequirement(BaseModel):
     combine: Combine = "all"
     items: list[RequirementItem] = []
     numeric_kind: NumericKind | None = None
-    min_value: float | None = Field(default=None, ge=0, description="연 단위. 0은 지원에 필요한 최소 경력이 없다는 뜻")
-    max_value: float | None = Field(default=None, ge=0, description="상한 기록용. 판정에 쓰지 않는다")
+    min_value: float | None = Field(default=None, ge=0, allow_inf_nan=False, description="연 단위. 0은 지원에 필요한 최소 경력이 없다는 뜻")
+    max_value: float | None = Field(default=None, ge=0, allow_inf_nan=False, description="상한 기록용. 판정에 쓰지 않는다")
     career_family: str | None = Field(default=None, description="JF_*. None이면 모든 인턴·경력을 합산")
     career_family_basis: CareerFamilyBasis | None = None
     min_degree: Degree | None = None
@@ -406,6 +415,8 @@ class JobRequirement(BaseModel):
                 self.allows_graduating = False
         if kind == "major" and not self.major_names:
             raise ValueError("numeric_kind=major이면 major_names가 1개 이상 있어야 한다")
+        if kind == "major" and not any(normalize_major(n) for n in self.major_names):
+            raise ValueError(f"major_names가 모두 빈 전공명이다(정리하면 빈 이름): {self.major_names}")
         if self.combine == "any_of":
             if len(self.items) < 2:
                 raise ValueError("combine=any_of이면 items가 2개 이상이어야 한다")
@@ -685,6 +696,7 @@ class Education(BaseModel):
     majors: list[str] = Field(default=[], description="주전공·복수전공·부전공")
     status: EducationStatus
     graduation_month: Month | None = None
+    raw: str | None = Field(default=None, description="프로필 원문 한 줄. 학력·전공 판정의 근거 인용에만 쓴다")
 
 
 class ExperiencePeriod(BaseModel):
@@ -709,6 +721,14 @@ class Experience(BaseModel):
     tools: list[str] = []
     result: str | None = None
     _as_of_month: str | None = PrivateAttr(default=None)
+
+    @field_validator("category")
+    @classmethod
+    def _check_category(cls, value: str | None) -> str | None:
+        """직무군 ID가 아닌 값은 입력 오류다. 조용히 두면 "경력 부족"(not_met)으로 잘못 판정된다 (eligibility.md 1-2)."""
+        if value is not None and not value.startswith("JF_"):
+            raise ValueError(f"category는 JF_* 또는 null이어야 한다: {value!r}")
+        return value
 
     @computed_field
     @property

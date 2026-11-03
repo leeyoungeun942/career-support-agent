@@ -82,8 +82,9 @@
 | 칸 | 입력 / 계산 | 쓰는 판정 규칙 |
 |---|---|---|
 | `education[]`: `degree`, `majors[]`(주전공·복수전공·부전공), `status`, `graduation_month` | 사용자 입력 | 학력 순서(6장), 전공(7장), 졸업 예정(6장) |
+| `education[].raw` (선택) | 사용자 입력 | 프로필 원문 한 줄. 예: "OO대학교 영어영문학과 졸업 (2026.02)". 코드가 낸 학력·전공 판정의 **근거 인용**에만 쓴다. 없으면 근거를 비워 둔다 (13장) |
 | `experiences[].id` | 코드 부여 | 근거의 `experience_id` |
-| `experiences[].title` | 사용자 입력 | 근거 표시 |
+| `experiences[].title` | 사용자 입력 | 근거 표시. 코드가 낸 경력 판정의 **근거 인용**으로 쓴다 (13장) |
 | `experiences[].type`: `intern` / `full_time` / `contract` / `project` / `activity` | 사용자 입력 | 경력 합산 대상 판단 (4장) |
 | `experiences[].category` (`JF_*`) | 사용자 입력 또는 분류 | 관련 경력 인정 (4장) |
 | `experiences[].period`: `start`, `end` (`"YYYY-MM"`, 진행 중이면 `end=null`) | 사용자 입력 | 경력 기간 (11장) |
@@ -94,7 +95,7 @@
 | `skills_denied[]` | 사용자 입력 | "없음" 응답 → `user_denied` (3장). 칸이 비어 있으면 "모름"이다 |
 | `certificates[]`, `other_qualifications[]` | 사용자 입력 | 자격증·면허, 그 밖의 요건 (8장) |
 
-- **`Experience.category`에는 직무군 ID(`JF_*`)를 쓴다.** 직무 게이트와 자격요건 평가가 같은 직무군 분류표를 공유한다 ([job-family-definition.md](job-family-definition.md)).
+- **`Experience.category`에는 직무군 ID(`JF_*`)를 쓴다.** `JF_`로 시작하지 않는 값은 프로필 입력 오류로 거부한다(직무군 데이터가 잘못된 것을 "경력 부족"(`not_met`)으로 바꾸지 않는다). 모르면 `null`이다. 직무 게이트와 자격요건 평가가 같은 직무군 분류표를 공유한다 ([job-family-definition.md](job-family-definition.md)).
 - 입력 안내 문구: "모르면 억지로 채우지 말고 비워 두거나 '확인 필요'로 입력하세요." 0-3 원칙과 같다.
 - 쓰지 않는 칸: `context`, `problem_or_goal`, `team`, `metrics`, `learning`, `evidence_links`는 적합성 평가와 자기소개서 쪽 몫이다.
 
@@ -193,6 +194,19 @@
 
 `graduation_pending`과 `category_unclear`는 각각 6장과 4장의 계산에서만 생긴다.
 
+**코드가 정하는 질문 문구.** 코드(`core/rules.py`)가 `needs_check`를 낼 때 `question_for_user`에 넣는 문장이다. `{ }`는 값으로 채운다.
+
+| 사유 | 만들어지는 곳 | 질문 문구 |
+|---|---|---|
+| `no_threshold` | 5장 "연차 무관" | 이 공고는 경력 기준을 적지 않았습니다. 인턴 경력이 포함되는지 공고에 확인해 보세요 |
+| `no_profile_info` | 6장 학력 칸이 빔 | 학력 정보를 입력해 주세요 |
+| `no_profile_info` | 7장 전공 칸이 빔 | 전공을 입력해 주세요 |
+| `no_profile_info` | 4장 경험 목록이 빔 | 인턴·정규직·계약직 경험이 있으면 입력해 주세요 |
+| `graduation_pending` | 6장 | 이 공고는 졸업 예정자 지원 가능 여부를 적지 않았습니다. 지원할 수 있는지 공고를 확인해 보세요 |
+| `category_unclear` | 4장 2단계 | ‘{경험 제목}’ 경험은 어떤 직무 경험인가요? (직무군을 모르는 경험이 여럿이면 ‘A’, ‘B’ 경험은 …) |
+| `scope_unclear` | 7장 전공명이 다름 | 이 공고는 {전공명 목록} 전공을 요구합니다. {지원자 전공} 전공으로 지원할 수 있는지 공고를 확인해 보세요 |
+| `scope_unclear` | 4-1 인접 직무 경험 | 이 공고의 "관련 경력"에 ‘{경험 제목}’ 경험이 포함되는지 공고를 확인해 보세요 (인접 직무 경험이 여럿이면 ‘A’, ‘B’ 경험이) |
+
 ### 3-2. 미충족 확인 (`not_met`)
 
 | 사유 코드 | 화면 문구 | 허용 조건 |
@@ -253,6 +267,15 @@
 - 직무 전환자가 공고 직무에 맞는 경험을 얼마나 가졌는지는 적합성 평가 몫이다. 자격요건은 지원할 수 있는지만 본다.
 
 샘플 프로필의 인턴(OO솔루션즈 B2B AI 사업부 기획팀)은 업무가 서비스 기획 보조, QA, 와이어프레임 작성이다. 그래서 `category=JF_SERVICE_PLANNING`, 6개월로 본다.
+
+### 4-2. 코드 구현 규칙
+
+`core/rules.py`가 4장과 4-1장을 구현할 때 쓰는 세부 규칙이다.
+
+- **인접 직무군 쌍 (4-1 3단계).** 쌍의 원본은 [job-gate.md](job-gate.md) 4-2 표이고 **`사용` 상태인 쌍만** 쓴다. 쌍은 순서가 없다(서비스기획↔프로젝트관리는 프로젝트관리↔서비스기획과 같다). 코드는 쌍을 **인자로 받는다**. 기본값은 지금 표의 `사용` 쌍 3개(`JF_SERVICE_PLANNING`↔`JF_PROJECT_MGMT`, `JF_SERVICE_PLANNING`↔`JF_UIUX_DESIGN`, `JF_DEV`↔`JF_QA`)이고, 기본값이 표와 같은지 테스트가 문서를 읽어 대조한다. 게이트 설정값이 이식되면 그 값을 넘긴다.
+- **프로필이 비어 있을 때 (0-3).** 경험 목록(`experiences`)이 비어 있고 `min_value`가 0보다 크면 `needs_check`(`no_profile_info`)다. 경험은 있는데 연수에 넣는 유형(`intern`, `full_time`, `contract`)이 하나도 없으면 연수 0개월로 보고 기준 미달이면 `not_met`(`below_threshold`)이다. `min_value`가 0이면 어느 쪽이든 `met`이다.
+- **`compared` 표기.** 개월로 적고 기준에만 연을 덧붙인다(11장). `met`이면 `"합계 개월 ≥ 기준 개월"`, `not_met`이면 `"합계 개월 < 기준 개월(N년)"`이다. 합계는 **1단계(같은 직무군) 개월 수**다. `needs_check`(`category_unclear`, `scope_unclear`)도 같은 형식으로 1단계 개월을 적는다(예: `"6개월 < 36개월(3년)"`). 판단이 갈리는 이유는 `question_for_user`가 설명한다. `career_family=null`이면 연수에 넣는 모든 경험의 합집합이다. 기준의 연이 정수가 아니면 소수로 쓴다(예: 18개월(1.5년)).
+- **근거 인용.** 판정에 쓴 경험마다 `{experience_id, quote=title}`을 남긴다. 판정에 쓴 경험이 없으면 근거를 비운다.
 
 ## 5. 경력 요건 해석 (신입/경력)
 
@@ -318,6 +341,9 @@
 - `재학`, `중퇴`는 그 학력을 갖지 않은 것으로 보고, **졸업한 학력 중 가장 높은 것**과 비교한다.
 - **졸업 예정자:** 졸업한 학력만으로 충족하면 `met`이다. 졸업 예정 학력까지 넣어야 충족하는 경우에는, 공고에 "졸업 예정자 지원 가능"이 있으면(`allows_graduating=true`) `met`, 없으면 `needs_check`(`graduation_pending`)다.
 - 졸업한 학력도 졸업 예정 학력도 기준에 못 미치면 `not_met`(`below_threshold`)이다.
+- **`education`이 비어 있으면** 학력 요건은 `needs_check`(`no_profile_info`)다. 졸업 학력이 없고 `enrolled`·`dropped`만 있으면 기준 미달이므로 `not_met`이다.
+- `compared`는 `"학사 졸업 ≥ 전문학사"`(`met`), `"학사 졸업예정 ≥ 학사"`(졸업 예정으로 충족), `"고졸 < 학사"`(`not_met`)처럼 졸업한 가장 높은 학력으로 적는다. 졸업 예정 학력까지 넣어야 충족하는데 공고에 "졸업 예정자 가능"이 없어 `needs_check`(`graduation_pending`)일 때도 졸업한 가장 높은 학력으로 적는다(예: `"고졸 < 학사"`). 졸업한 학력이 하나도 없으면 `"졸업 학력 없음 < 학사"`로 적는다. 학력 이름은 `고졸`, `전문학사`, `학사`, `석사`, `박사`다.
+- **근거.** `met`·`graduation_pending`은 판정에 쓴 학력 항목(졸업 예정으로 충족하거나 확인이 필요한 것은 졸업 예정 항목), `not_met`은 졸업한 가장 높은 학력 항목의 `raw`를 `field="education[i]"`로 인용한다. `raw`가 없거나 졸업한 학력이 없으면 근거를 비운다. 같은 학력이 여럿이면 `education`에서 앞선 항목을 쓴다. 근거는 `education[i]`의 `raw`가 있을 때만 인용한다 (13장).
 
 ## 7. 전공
 
@@ -337,14 +363,18 @@
 
 - **전공명이 달라도 `not_met`을 내지 않는다.** 두 이름이 같은 전공으로 인정되는지, 회사가 엄격하게 구분하는지 공고만으로 알 수 없다 (0-2 해석, 0-3).
 - 프로필의 모든 `education[]` 항목의 전공을 본다. 학력 수준(졸업 여부)은 6장이 따로 판정한다.
+- **`compared`.** `met`이면 `"{지원자 전공} = {일치한 공고 전공명}"`(예: `"경제학과 = 경제학 전공"`), `needs_check`(`scope_unclear`)이면 `"{지원자 전공 목록} ≠ {공고 전공명 목록}"`이다. 이름은 입력한 그대로 적고 정리한 이름은 쓰지 않는다. 목록은 `, `로 잇는다.
+- **근거.** `met`은 일치한 전공이 있는 `education[i]`, `scope_unclear`는 전공을 적은 모든 `education[i]`의 `raw`를 `field="education[i]"`로 인용한다. `raw`가 없으면 근거를 비운다.
+- **전공 칸이 빔.** `education`이 비었거나 모든 항목의 `majors`가 비면 `needs_check`(`no_profile_info`)다.
 
 ### 7-2. 코드가 하는 전공명 정리의 범위
 
 코드는 아래만 한다. 그 밖의 유사성·관련성 판단은 코드도 LLM도 자동으로 확정하지 않고 `needs_check`로 둔다.
 
-1. 공백을 지우고, 표준 접미사("학과", "학부", "전공")를 뗀다. 예: "경제 학과" → "경제학"
+1. 공백을 지우고, 끝의 "전공"을 뗀 뒤, 끝이 "학과"·"학부"이면 "과"·"부"를 뗀다(학 글자는 남긴다). 예: "경제 학과" → "경제학", "경제학과 전공" → "경제학", "컴퓨터공학부" → "컴퓨터공학". 지원자 전공과 공고 `major_names`에 같은 정리를 한다
 2. 정리한 이름을 공고의 `major_names`와 **정확히** 비교한다.
 3. 복수전공·부전공 목록에서도 같은 비교를 한다.
+4. 정리한 결과가 빈 이름(공백만 있거나 "전공"뿐인 이름)은 전공으로 보지 않는다. 지원자 쪽이면 입력하지 않은 것(`no_profile_info`)으로, 공고 쪽이면 비교 대상에서 뺀다. 공고의 `major_names`가 **모두** 빈 이름이면 비교할 전공명이 없는 것이므로 판정하지 않고 요건 입력 오류로 거부한다(요건 추출이 전공명을 뽑지 못한 경우이며, 추출 단계가 `partial_extraction` 등으로 처리한다).
 
 "컴퓨터과학"과 "컴퓨터공학"이 같은지 같은 판단은 하지 않는다. 사용자에게 "이 공고는 컴퓨터공학 전공을 요구합니다. 컴퓨터과학 전공으로 지원할 수 있는지 공고를 확인해 보세요"처럼 묻는다.
 
@@ -427,11 +457,24 @@
 | 단계 | 담당 | 내용 |
 |---|---|---|
 | 1. 요건 추출 | LLM (공고 분석) + 코드 확인 | 요건 분리, `level`, `type`, `numeric_kind`, `min_value`, `career_family`, `career_family_basis`, `major_names`. `text`는 공고 원문. `extraction_status`는 LLM이 제안하고 코드가 `extraction_issues`를 확인해 내릴 수 있다 (1-4) |
-| 2. numeric 판정 | **코드** | 경력 연수 합산(11장), 학력 순서(6장), 전공명 정리와 정확 비교(7-2). `compared` 문자열 생성. 전공명의 유사성·관련성은 판단하지 않고 `needs_check`로 둔다 |
+| 2. numeric 판정 | **코드** | 경력 연수 합산(11장), 학력 순서(6장), 전공명 정리와 정확 비교(7-2). `compared` 문자열 생성(4-2). 전공명의 유사성·관련성은 판단하지 않고 `needs_check`로 둔다. 근거는 계산에 쓴 경험의 `title`, 학력은 `education[].raw`(있을 때만)를 인용한다 |
 | 3. skill·qualitative 근거 찾기 | LLM | 프로필 근거 = 경험 id + 프로필 원문 인용. 근거가 불충분하면 `needs_check` |
-| 4. 상태 검증 | **코드** | LLM이 `not_met`을 내면 코드가 `needs_check`로 되돌린다. `not_met`은 numeric 값 비교와 `user_denied`만 허용한다 |
+| 4. 상태 검증 | **코드** | LLM이 `not_met`을 내면 코드가 `needs_check`로 되돌린다. `not_met`은 numeric 값 비교와 `user_denied`만 허용한다. 되돌릴 때의 사유는 LLM이 낸 확인 필요 사유가 유효하면 그대로 쓰고, 없으면 `scope_unclear`다. `interpretation_note`에 "AI가 미충족으로 판단해 확인 필요로 조정"을 남긴다. 사용자가 정한 `user_denied`는 되돌리지 않는다. 이 검증은 LLM의 원시 출력에 스키마 검증 **전에** 적용한다 |
 | 5. 종합 판정·요약 | **코드** | `any_of` 항목 결과 합치기(2장), `verdict`, 결정적 요건, `needs_check_count`, `summary` |
 
+- **상태 검증의 범위 (4단계).** 4단계는 LLM의 원시 출력(딕셔너리)에만 적용한다. 원시 출력은 AI가 낸 것이므로 안에 적힌 `status_decided_by`를 믿지 않고 모두 `ai`로 덮고(`any_of` 항목 포함, 상태가 `null`인 것은 제외), `not_met`은 예외 없이 `needs_check`로 되돌린다. 코드가 판정한 `numeric`의 `not_met`(`below_threshold`)과 사용자가 정한 `user_denied`는 이 검사를 거치지 않는다. 앞의 것은 코드가 만든 결과 객체이고, 뒤의 것은 사용자 답변을 받은 쪽이 검증된 결과 객체(`status_decided_by=user`)로 만들어 넘긴다. 이 검사를 단독으로 불러도 판정 주체를 믿지 않는다.
+  - 되돌린 결과의 `status_decided_by`는 `ai`다. 사유는 LLM이 낸 값이 확인 필요 사유(3-1)이면 그대로, 아니면(`below_threshold`, `user_denied`, 빈 값, 모르는 값) `scope_unclear`다.
+  - `any_of` 요건은 항목마다 같은 검사를 한다. 하나라도 되돌리면 요건의 `interpretation_note`에 한 번 남긴다. `interpretation_note`가 이미 있으면 뒤에 ` / `로 이어 쓴다.
+  - 입력 딕셔너리를 바꾸지 않고 새 딕셔너리를 돌려준다. 상태가 `null`(`preference`), `met`, `needs_check`인 결과는 상태와 사유를 손대지 않는다(판정 주체만 `ai`로 덮는다).
+- **`any_of` 합치기 (5단계).** 결정 항목(data-contract 2-4)의 `status`, `reason_code`, `evidence_checked_by`, `status_decided_by`를 요건 전체 값으로 옮기고, `job_quote`, `profile_evidence`, `compared`, `question_for_user`는 비운다. 항목의 `item_index`가 요건의 `items`와 1:1이 아니거나 `combine`이 `any_of`가 아니면 오류다.
+- **결과 조립 (코드).** 코드는 위 1~5단계를 이어서 공고 1건의 결과를 만든다. 입력은 같은 공고의 게이트 결과, 프로필, 요건 목록(1단계 출력), `skill`·`qualitative` 요건의 판정(3단계 출력), `extraction_issues`다.
+  - `job_id`와 `gate_ranking_group`은 게이트 결과에서 복사하고, `as_of_month`는 프로필에서 가져온다.
+  - 요건 유형마다 판정하는 쪽이 다르다: `numeric`은 코드가 판정한다(2단계). `preference`는 `status=null`로 결과에만 남긴다. `skill`·`qualitative`는 밖에서 받은 판정을 쓴다.
+  - 밖에서 받는 판정은 요건마다 하나씩 있어야 한다. **빠진 요건이 있으면 오류**다(확인하지 않은 요건을 조용히 `needs_check`로 채우지 않는다). `numeric`·`preference` 요건이나 없는 요건의 판정을 받으면 오류다.
+  - 받은 판정이 LLM의 원시 출력(딕셔너리)이면 4단계(되돌림)를 적용한 뒤 스키마 검증을 하고, `any_of`는 항목을 합친다(5단계). 이미 검증된 결과 객체이면 그대로 쓴다. `requirement_id`가 다르면 오류다.
+  - **원시 딕셔너리는 4단계를 거친다.** LLM이 스스로 `user`라고 적어 `not_met`을 살리는 길을 막으려고 판정 주체를 `ai`로 덮는다(위 "상태 검증의 범위"). 사용자가 정한 판정(`user_denied`)은 검증된 결과 객체로 넘긴다.
+  - 요건 `id`가 겹치면 오류다(판정이 엉뚱한 요건에 붙는 것을 막는다).
+  - 만들기 전에 모든 `profile_evidence`를 프로필 원문과 대조한다(위 "프로필 근거 검증"). 어긋나면 결과를 만들지 않는다.
 - **종합 판정 규칙:** `level=required`이고 `type≠preference`인 요건만 본다.
   1. 미충족이 하나라도 있으면 `not_eligible`
   2. 없고 확인 필요가 하나라도 있으면 `conditional`
@@ -439,6 +482,10 @@
   4. 그 밖에는 `eligible`. 필수 요건이 0개여도 추출이 `complete`이면 여기에 온다
 - **결정적 요건:** `not_eligible`이면 `not_met`인 필수 요건 전부, `conditional`이면 `needs_check`인 필수 요건 전부, `eligible`이면 없음이다. 3번 경우처럼 추출 불완전 때문에 `conditional`이면 결정적 요건은 없고, `summary`가 `extraction_issues`를 보여 준다.
 - `summary`는 LLM이 쓰지 않는다. 코드가 판정 값을 템플릿에 넣어 만든다.
+- **프로필 근거 검증 (코드).** `profile_evidence`의 `experience_id`가 프로필에 있어야 하고, `quote`가 그 경험의 원문(`title`, `role`, `actions`, `tools`, `result`) 안에 있어야 한다. `field` 근거(`skills`, `certificates`, `education[i]`)도 해당 칸의 원문 안에 있어야 한다. 어기면 오류로 처리하고 결과를 저장하지 않는다. 스키마는 프로필을 모르므로 이 검사는 코드가 한다.
+  - **원문을 찾는 방법.** `quote`는 원문 **한 조각 안에** 글자 그대로 들어 있어야 한다. 조각은 `title`, `role`, `result`, `actions`의 항목 하나, `tools`의 항목 하나이고, `field` 근거는 `skills`·`certificates`·`other_qualifications`의 항목 하나, `education[i]`의 `raw`다. 여러 조각을 이어 붙인 글에서는 찾지 않는다. 공백이나 문장부호를 맞춰 주지 않는다. 새로 쓴 문장이 근거로 들어오는 것을 막으려는 규칙이다.
+  - **다음은 모두 오류다.** 프로필에 없는 `experience_id`, 위 칸이 아닌 `field`(`skills_denied` 포함), 범위를 벗어난 `education[i]`, `raw`가 없는 `education[i]`, 조각 안에 없는 `quote`.
+  - **오류는 모아서 낸다.** 위반을 모두 찾아 한 번에 알린다. 위반마다 요건 id(`any_of`는 항목 번호도)와 근거를 적는다. `any_of` 항목의 근거도 같은 검사를 한다. 검사는 요건의 `profile_evidence`가 비어 있어도 통과한다.
 - 근거는 원문 인용으로 남긴다. `job_quote`는 해당 요건 `text` 안에, 프로필 인용은 프로필 원문 안에 있어야 한다.
 - 근거를 찾으려고 프로필을 **확인한** 주체(`evidence_checked_by`)와 상태를 정한 주체(`status_decided_by`)는 따로 기록한다. 확인했지만 근거가 없었던 경우(`no_profile_info`)도 확인한 주체를 적는다. 아직 확인하지 않았으면 `null`이다.
 
@@ -449,6 +496,12 @@
 - **정렬 순서:** `ranking_group` → `verdict` → 적합성 점수다. 뒤 기준은 앞 기준을 넘지 못한다. 점수가 자격요건 결과를 덮어쓰지 않는다.
   - `ranking_group`: `primary` → `job_mismatch` → `out_of_scope` (맨 아래)
   - `verdict`: `eligible` → `conditional` → `not_eligible`
+  - **점수의 범위와 의미는 적합성 평가 정책(fit-evaluation.md)에서 정한다.** 범위(0~100 여부), 정수·실수, 음수 허용, 점수 없음의 의미(아직 계산하지 않음과 계산에 실패함의 구분)가 그 대상이다. 이 코드는 유한한 숫자만 받고 범위를 제한하지 않는다.
+  - **적합성 점수가 없으면** (적합성 평가가 아직 없거나 계산하지 않은 공고) 같은 `ranking_group`·`verdict` 안에서 점수가 있는 공고가 먼저 오고, 점수가 없는 공고끼리는 입력 순서를 유지한다. 점수가 같을 때도 입력 순서를 유지한다(안정 정렬). 점수는 높은 쪽이 먼저다.
+  - **코드의 입력.** 자격요건 결과 목록, 같은 공고들의 게이트 결과 목록, 점수(`job_id` → 점수, 선택)를 받는다. 점수는 판정 칸이 아니라 정렬에만 쓰는 값이다. 코드는 점수를 계산하지 않는다.
+  - **정렬하기 전에 게이트와 맞춰 본다 (data-contract 2-2).** 모든 결과에 같은 `job_id`의 게이트 결과가 있어야 하고, 결과의 `gate_ranking_group`이 게이트 결과의 `ranking_group`과 같아야 한다. 어긋나면 정렬하지 않고 오류를 낸다. 오류에는 `job_id`와 두 값을 적는다.
+  - **다음도 오류다.** 같은 `job_id`가 결과나 게이트 결과에 둘 이상 있을 때, 점수의 `job_id`가 결과에 없을 때, 점수가 숫자가 아니거나 유한하지 않을 때(`NaN`, 무한대).
+  - 게이트 결과가 있는데 자격요건 결과가 없는 공고는 오류가 아니다. 정렬 대상에서 빠진다.
 - `not_eligible` 공고도 **지우지 않는다.** 결정적 요건과 함께 보여 준다. 예: "서비스 기획 경력 6개월 < 36개월(3년)".
 - **`job_mismatch`, `out_of_scope` 그룹의 판정은 "참고용 평가"로 표시한다.** 지원 추천이 아니다. 문구 예: "직무가 달라 참고용으로만 평가했습니다".
 - `primary` 그룹이어도 `display_flag`("직무 범위 차이", "직무 확인 필요")는 게이트 쪽에서 정한 표시 그대로 보여 준다.
@@ -600,6 +653,7 @@
 - [x] 12장 추가 규칙, 13장 코드와 LLM 분담, 14장 순위와 표시
 - [x] 16장 개인정보와 저장 범위
 - [x] 17장 샘플 6건 기대 판정
+- [x] 4-2 코드 구현 규칙(인접 쌍은 인자로, 빈 프로필, `compared` 표기, 근거 인용), 3-1 코드가 정하는 질문 문구, 6장 빈 학력, 13장 되돌림 사유와 프로필 근거 검증, 14장 점수 없을 때의 정렬 (이슈 #4)
 
 ### 남은 작업
 
@@ -645,3 +699,10 @@
 - 2026-11-03: 검토 반영. `evidence_found_by`를 `evidence_checked_by`로(확인한 주체), 결과의 `ranking_group` 복사 칸을 `gate_ranking_group`으로 바꿈. `extraction_issues`는 필수 요건 없음을 확정할 수 없게 만드는 문제만 적는다고 명시
 - 2026-11-03: data-contract 2장 작성에 맞춤. 1-4 추출 상태는 `extraction_issues`에서 계산하는 값으로 정리. 2장 `any_of`는 `skill`·`qualitative` 요건에만 쓴다고 명시
 - 2026-11-03: 코드 리뷰 반영. 3-2 `user_denied`는 `skill`·`qualitative` 요건에만. 1-4 `extraction_issues`에 `partial_extraction`, `required_preferred_ambiguous` 추가. 18장에 겹친 경력 합산 테스트(rules 구현 때 필수)와 fixture-정책 대조를 명시
+- 2026-11-03: `core/rules.py` 구현(이슈 #4)을 위한 보완. 4-2 신설(인접 직무군 쌍을 인자로 받음, 프로필이 비었을 때, `compared` 표기, 근거 인용). 1-2에 `education[].raw`(선택) 추가. 3-1에 코드가 정하는 질문 문구. 6장에 빈 학력 처리. 13장에 AI의 `not_met`을 되돌릴 때의 사유와 프로필 근거 검증. 14장에 적합성 점수가 없을 때의 정렬
+- 2026-11-03: `core/rules.py` 상태 검증과 `any_of` 합치기 구현(이슈 #4)을 위한 보완. 13장에 상태 검증의 범위(남기는 `not_met` 조건, 되돌린 뒤의 판정 주체·사유·메모, `any_of` 항목별 적용)와 `any_of` 합치기 규칙
+- 2026-11-03: `core/rules.py` 프로필 근거 검증 구현(이슈 #4)을 위한 보완. 13장에 원문 조각 단위 검사, `other_qualifications` 허용, 오류 조건과 오류를 모아 내는 방식
+- 2026-11-03: `core/rules.py` 순위 정렬과 게이트 일치 검사 구현(이슈 #4)을 위한 보완. 14장에 코드의 입력(결과·게이트 결과·점수), 정렬 전 게이트 일치 검사, 오류가 되는 입력
+- 2026-11-03: `core/rules.py` 결과 조립(`build_result`) 구현(이슈 #4)을 위한 보완. 13장에 결과 조립 규칙(입력, 유형별 판정 주체, 빠지거나 잘못된 판정은 오류, 되돌림·합치기·근거 검증 순서)
+- 2026-11-03: 코드 리뷰 반영. 13장 결과 조립에 원시 딕셔너리의 `status_decided_by`를 `ai`로 덮는 규칙과 요건 id 중복 오류. 7-2에 정리 결과가 빈 전공명 처리
+- 2026-11-03: PR #9 코드 리뷰 반영. 1-2에 `Experience.category`가 `JF_*`가 아니면 입력 오류. 7-2에 공고 `major_names`가 모두 빈 이름이면 요건 입력 오류. 13장 상태 검증을 LLM 원시 출력 전용으로 정리(판정 주체를 믿지 않고 `ai`로 덮고 `not_met`은 예외 없이 되돌림, 단독 호출도 동일). 14장에 점수의 범위·의미는 적합성 평가 정책에서 정한다는 문구
