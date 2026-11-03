@@ -466,6 +466,12 @@
   - `any_of` 요건은 항목마다 같은 검사를 한다. 하나라도 되돌리면 요건의 `interpretation_note`에 한 번 남긴다. `interpretation_note`가 이미 있으면 뒤에 ` / `로 이어 쓴다.
   - 입력 딕셔너리를 바꾸지 않고 새 딕셔너리를 돌려준다. 상태가 `null`(`preference`), `met`, `needs_check`인 결과는 손대지 않는다.
 - **`any_of` 합치기 (5단계).** 결정 항목(data-contract 2-4)의 `status`, `reason_code`, `evidence_checked_by`, `status_decided_by`를 요건 전체 값으로 옮기고, `job_quote`, `profile_evidence`, `compared`, `question_for_user`는 비운다. 항목의 `item_index`가 요건의 `items`와 1:1이 아니거나 `combine`이 `any_of`가 아니면 오류다.
+- **결과 조립 (코드).** 코드는 위 1~5단계를 이어서 공고 1건의 결과를 만든다. 입력은 같은 공고의 게이트 결과, 프로필, 요건 목록(1단계 출력), `skill`·`qualitative` 요건의 판정(3단계 출력), `extraction_issues`다.
+  - `job_id`와 `gate_ranking_group`은 게이트 결과에서 복사하고, `as_of_month`는 프로필에서 가져온다.
+  - 요건 유형마다 판정하는 쪽이 다르다: `numeric`은 코드가 판정한다(2단계). `preference`는 `status=null`로 결과에만 남긴다. `skill`·`qualitative`는 밖에서 받은 판정을 쓴다.
+  - 밖에서 받는 판정은 요건마다 하나씩 있어야 한다. **빠진 요건이 있으면 오류**다(확인하지 않은 요건을 조용히 `needs_check`로 채우지 않는다). `numeric`·`preference` 요건이나 없는 요건의 판정을 받으면 오류다.
+  - 받은 판정이 LLM의 원시 출력(딕셔너리)이면 4단계(되돌림)를 적용한 뒤 스키마 검증을 하고, `any_of`는 항목을 합친다(5단계). 이미 검증된 결과 객체이면 그대로 쓴다. `requirement_id`가 다르면 오류다.
+  - 만들기 전에 모든 `profile_evidence`를 프로필 원문과 대조한다(위 "프로필 근거 검증"). 어긋나면 결과를 만들지 않는다.
 - **종합 판정 규칙:** `level=required`이고 `type≠preference`인 요건만 본다.
   1. 미충족이 하나라도 있으면 `not_eligible`
   2. 없고 확인 필요가 하나라도 있으면 `conditional`
@@ -693,3 +699,4 @@
 - 2026-11-03: `core/rules.py` 상태 검증과 `any_of` 합치기 구현(이슈 #4)을 위한 보완. 13장에 상태 검증의 범위(남기는 `not_met` 조건, 되돌린 뒤의 판정 주체·사유·메모, `any_of` 항목별 적용)와 `any_of` 합치기 규칙
 - 2026-11-03: `core/rules.py` 프로필 근거 검증 구현(이슈 #4)을 위한 보완. 13장에 원문 조각 단위 검사, `other_qualifications` 허용, 오류 조건과 오류를 모아 내는 방식
 - 2026-11-03: `core/rules.py` 순위 정렬과 게이트 일치 검사 구현(이슈 #4)을 위한 보완. 14장에 코드의 입력(결과·게이트 결과·점수), 정렬 전 게이트 일치 검사, 오류가 되는 입력
+- 2026-11-03: `core/rules.py` 결과 조립(`build_result`) 구현(이슈 #4)을 위한 보완. 13장에 결과 조립 규칙(입력, 유형별 판정 주체, 빠지거나 잘못된 판정은 오류, 되돌림·합치기·근거 검증 순서)

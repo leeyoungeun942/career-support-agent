@@ -7,6 +7,7 @@ import pytest
 
 from core.rules import (
     ADJACENT_FAMILY_PAIRS,
+    build_result,
     career_experiences,
     check_gate_consistency,
     check_profile_evidence,
@@ -1093,3 +1094,209 @@ def test_rank_jobs_does_not_mutate_input_lists():
     ids = [r.job_id for r in results]
     rank_jobs(results, [gate_of("a"), gate_of("b")])
     assert [r.job_id for r in results] == ids
+
+
+# ---------------------------------------------------------------------
+# 결과 조립과 샘플 6건 종합 회귀 (정책 13장, 17장)
+# ---------------------------------------------------------------------
+FIXTURE_DATA = json.loads(SAMPLE_FIXTURE.read_text(encoding="utf-8"))
+SAMPLES = FIXTURE_DATA["samples"]
+
+
+def fixture_requirements(sample):
+    return [JobRequirement(**{k: v for k, v in r.items() if k not in (*JUDGED_KEYS, "item_statuses")}) for r in sample["requirements"]]
+
+
+def fixture_judgements(sample):
+    """skill·qualitative 요건의 fixture 상태를 LLM 원시 출력(딕셔너리)처럼 주입한다. numeric과 preference는 넣지 않는다."""
+    given = {}
+    for r in sample["requirements"]:
+        if r["type"] not in ("skill", "qualitative"):
+            continue
+        base = {"status_decided_by": "ai", "evidence_checked_by": "ai"}
+        if "item_statuses" in r:
+            given[r["id"]] = {"item_results": [{**base, "item_index": i, "status": st, "reason_code": rc}
+                                               for i, (st, rc) in enumerate(r["item_statuses"])]}
+        else:
+            given[r["id"]] = {**base, "status": r["status"], "reason_code": r.get("reason_code")}
+    return given
+
+
+def fixture_profile():
+    return EligibilityProfile(**{**FIXTURE_DATA["profile"], "as_of_month": FIXTURE_DATA["as_of_month"]})
+
+
+def build_sample_result(sample):
+    return build_result(gate_of(sample["job_id"], sample["gate_ranking_group"]), fixture_profile(),
+                        fixture_requirements(sample), fixture_judgements(sample))
+
+
+def expected_status(req):
+    """fixture가 기대하는 요건 상태. any_of는 하나라도 met이면 met, 전부 not_met이면 not_met, 그 밖에는 needs_check."""
+    if req["type"] == "preference":
+        return None
+    if "item_statuses" in req:
+        statuses = [st for st, _ in req["item_statuses"]]
+        return "met" if "met" in statuses else ("not_met" if set(statuses) == {"not_met"} else "needs_check")
+    return req["status"]
+
+
+@pytest.mark.parametrize("sample", SAMPLES, ids=[f"sample-{s['number']}" for s in SAMPLES])
+def test_sample_full_result_matches_policy_17(sample):
+    result = build_sample_result(sample)
+    assert result.verdict == sample["expected"]["verdict"]
+    assert result.decisive_requirement_ids == sample["expected"]["decisive"]
+    assert result.extraction_status == "complete"
+    assert [r.status for r in result.requirement_results] == [expected_status(r) for r in sample["requirements"]]
+    expected_pending = sum(1 for r in sample["requirements"] if r["level"] == "required" and expected_status(r) == "needs_check")
+    assert result.needs_check_count == expected_pending
+    assert result.gate_ranking_group == sample["gate_ranking_group"]
+    assert result.reference_only == (sample["gate_ranking_group"] != "primary")
+
+
+@pytest.mark.parametrize("sample", SAMPLES, ids=[f"sample-{s['number']}" for s in SAMPLES])
+def test_sample_numeric_results_are_decided_by_code(sample):
+    result = build_sample_result(sample)
+    for req, res in zip(result.requirements, result.requirement_results):
+        if req.type == "numeric":
+            assert (res.status_decided_by, res.evidence_checked_by) == ("rule", "rule")
+
+
+def test_sample_5_any_of_item_results_are_kept():
+    result = build_sample_result(SAMPLES[4])
+    r3 = next(r for r in result.requirement_results if r.requirement_id == "5-R3")
+    assert [it.status for it in r3.item_results] == ["met"] + ["needs_check"] * 5
+    assert (r3.status, r3.reason_code) == ("met", None)
+
+
+def test_sample_results_rank_with_gates_as_in_policy_14():
+    results = [build_sample_result(s) for s in SAMPLES]
+    gates = [gate_of(s["job_id"], s["gate_ranking_group"]) for s in SAMPLES]
+    assert [r.job_id for r in rank_jobs(results, gates)] == ["sample-3", "sample-1", "sample-4", "sample-5", "sample-2", "sample-6"]
+
+
+def test_sample_2_preference_requirement_stays_without_status():
+    result = build_sample_result(SAMPLES[1])
+    pref = next(r for r in result.requirement_results if r.requirement_id == "2-P1")
+    assert (pref.status, pref.reason_code, pref.status_decided_by) == (None, None, None)
+
+
+# --- 입력 오류 ---------------------------------------------------------
+def small_case(*requirements, group="primary"):
+    return gate_of("j1", group), eprof(edu("bachelor", majors=["경제학"], raw="OO대 경제학과 졸업")), list(requirements)
+
+
+def ai_judgement(status="met", reason=None, **kw):
+    return {"status": status, "reason_code": reason, "status_decided_by": "ai", "evidence_checked_by": "ai", **kw}
+
+
+def test_missing_skill_judgement_is_an_error_not_a_silent_needs_check():
+    gate, profile, reqs = small_case(skill_req("S1"), skill_req("S2"))
+    with pytest.raises(ValueError, match="S2"):
+        build_result(gate, profile, reqs, {"S1": ai_judgement()})
+
+
+@pytest.mark.parametrize("bad_id,message", [("N1", "type=numeric"), ("P1", "type=preference"), ("nope", "요건 목록에 없는")])
+def test_judgement_for_wrong_requirement_is_an_error(bad_id, message):
+    gate, profile, reqs = small_case(skill_req("S1"), edu_req("bachelor", id="N1"),
+                                     JobRequirement(id="P1", level="preferred", type="preference", text="꼼꼼한 분"))
+    with pytest.raises(ValueError, match=message):
+        build_result(gate, profile, reqs, {"S1": ai_judgement(), bad_id: ai_judgement()})
+
+
+def test_judgement_requirement_id_mismatch_is_an_error():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    with pytest.raises(ValueError, match="requirement_id"):
+        build_result(gate, profile, reqs, {"S1": ai_judgement(requirement_id="S2")})
+    with pytest.raises(ValueError, match="requirement_id"):
+        build_result(gate, profile, reqs, {"S1": RequirementResult(requirement_id="S2", status="met", status_decided_by="ai",
+                                                                   evidence_checked_by="ai")})
+
+
+def test_requirement_id_is_filled_when_raw_judgement_omits_it():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    assert build_result(gate, profile, reqs, {"S1": ai_judgement()}).requirement_results[0].requirement_id == "S1"
+
+
+def test_validated_result_object_is_accepted_as_is():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    given = RequirementResult(requirement_id="S1", status="met", status_decided_by="ai", evidence_checked_by="ai")
+    assert build_result(gate, profile, reqs, {"S1": given}).requirement_results[0] is given
+
+
+# --- 되돌림·근거 검증·합치기가 조립 안에서 이어서 동작 ----------------------
+def test_ai_not_met_is_reverted_during_assembly():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    result = build_result(gate, profile, reqs, {"S1": ai_judgement("not_met", "user_denied")})
+    res = result.requirement_results[0]
+    assert (res.status, res.reason_code, res.interpretation_note) == ("needs_check", "scope_unclear", NOTE)
+    assert result.verdict == "conditional"
+
+
+def test_user_denied_keeps_not_met_and_makes_not_eligible():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    given = ai_judgement("not_met", "user_denied", status_decided_by="user")
+    result = build_result(gate, profile, reqs, {"S1": given})
+    assert (result.verdict, result.decisive_requirement_ids) == ("not_eligible", ["S1"])
+
+
+def test_fabricated_evidence_stops_assembly():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    given = ai_judgement(profile_evidence=[field_ev("skills", "지어낸 스킬")])
+    with pytest.raises(ValueError, match="프로필 근거 검증 실패"):
+        build_result(gate, profile, reqs, {"S1": given})
+
+
+def test_valid_ai_evidence_passes_and_rule_evidence_is_checked_too():
+    gate, profile, reqs = small_case(skill_req("S1"), edu_req("bachelor", id="N1"))
+    profile = profile.model_copy(update={"skills": ["SQL 기초"]})
+    given = ai_judgement(profile_evidence=[field_ev("skills", "SQL")])
+    result = build_result(gate, profile, reqs, {"S1": given})
+    assert [e.quote for e in result.requirement_results[0].profile_evidence] == ["SQL"]
+    assert [e.field for e in result.requirement_results[1].profile_evidence] == ["education[0]"]
+
+
+def test_any_of_raw_items_are_reverted_and_merged():
+    req = any_of_req()
+    gate, profile, _ = small_case()
+    given = {"item_results": [raw_item(0, "not_met", "user_denied"), raw_item(1, "needs_check", "no_profile_info")],
+             "interpretation_note": "9장 해석"}
+    result = build_result(gate, profile, [req], {"R1": given})
+    res = result.requirement_results[0]
+    assert (res.status, res.reason_code) == ("needs_check", "scope_unclear")  # 0번 항목이 되돌려져 첫 needs_check가 된다
+    assert res.interpretation_note == f"9장 해석 / {NOTE}"
+    assert [it.item_index for it in res.item_results] == [0, 1]
+
+
+# --- 조립 결과의 칸 ---------------------------------------------------------
+def test_gate_group_is_copied_and_marks_reference_only():
+    gate, profile, reqs = small_case(skill_req("S1"), group="job_mismatch")
+    result = build_result(gate, profile, reqs, {"S1": ai_judgement()})
+    assert (result.job_id, result.gate_ranking_group, result.reference_only) == ("j1", "job_mismatch", True)
+
+
+def test_as_of_month_comes_from_profile():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    assert build_result(gate, profile, reqs, {"S1": ai_judgement()}).as_of_month == AS_OF
+
+
+def test_extraction_issues_make_eligible_conditional():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    complete = build_result(gate, profile, reqs, {"S1": ai_judgement()})
+    incomplete = build_result(gate, profile, reqs, {"S1": ai_judgement()}, extraction_issues=["partial_extraction"])
+    assert (complete.verdict, incomplete.verdict, incomplete.extraction_status) == ("eligible", "conditional", "incomplete")
+
+
+def test_no_requirements_and_complete_extraction_is_eligible():
+    gate, profile, _ = small_case()
+    assert build_result(gate, profile, [], {}).verdict == "eligible"
+
+
+def test_custom_adjacent_pairs_reach_career_judgement():
+    gate, _, _ = small_case()
+    profile = prof(job("a", "2023-01", "2025-12", QA))
+    req = career_req(3, family=DEV, basis="related")
+    default = build_result(gate, profile, [req], {}).requirement_results[0]
+    custom = build_result(gate, profile, [req], {}, adjacent_pairs=frozenset()).requirement_results[0]
+    assert (default.status, default.reason_code) == ("needs_check", "scope_unclear")  # 개발↔QA는 기본 인접 쌍
+    assert (custom.status, custom.reason_code) == ("not_met", "below_threshold")

@@ -440,3 +440,60 @@ def rank_jobs(
                 score is None, -(score or 0))
 
     return sorted(results, key=sort_key)
+
+
+# =====================================================================
+# 결과 조립 (eligibility.md 13장 "결과 조립")
+# =====================================================================
+
+def _injected_result(req: JobRequirement, given: RequirementResult | dict) -> RequirementResult:
+    """밖에서 받은 skill·qualitative 판정을 결과 객체로 만든다. 원시 딕셔너리는 되돌림 -> 검증 -> any_of 합치기를 거친다."""
+    given_id = given.requirement_id if isinstance(given, RequirementResult) else given.get("requirement_id", req.id)
+    if given_id != req.id:
+        raise ValueError(f"요건 {req.id}: 판정의 requirement_id가 {given_id!r}이다")
+    if isinstance(given, RequirementResult):
+        return given
+    raw = normalize_ai_result({**given, "requirement_id": req.id}, req)
+    if req.combine == "any_of":
+        items = [ItemResult(**item) for item in raw.get("item_results", [])]
+        return merge_any_of(req, items, raw.get("interpretation_note"))
+    return RequirementResult(**raw)
+
+
+def build_result(
+    gate: JobGateResult,
+    profile: EligibilityProfile,
+    requirements: list[JobRequirement],
+    judgements: Mapping[str, RequirementResult | dict],
+    extraction_issues: Iterable[str] = (),
+    adjacent_pairs: Collection[frozenset[str]] = ADJACENT_FAMILY_PAIRS,
+) -> EligibilityResult:
+    """공고 1건의 자격요건 결과를 조립한다. numeric은 코드가 판정하고, skill·qualitative는 judgements(요건 id -> 판정)에서 받는다."""
+    by_id = {req.id: req for req in requirements}
+    for req_id in judgements:
+        req = by_id.get(req_id)
+        if req is None:
+            raise ValueError(f"요건 목록에 없는 id의 판정: {req_id!r}")
+        if req.type not in ("skill", "qualitative"):
+            raise ValueError(f"요건 {req_id}: type={req.type}는 밖에서 판정을 받지 않는다")
+
+    results = []
+    for req in requirements:
+        if req.type == "numeric":
+            results.append(judge_numeric(req, profile, adjacent_pairs))
+        elif req.type == "preference":
+            results.append(RequirementResult(requirement_id=req.id, status=None))
+        elif req.id in judgements:
+            results.append(_injected_result(req, judgements[req.id]))
+        else:
+            raise ValueError(f"요건 {req.id}: {req.type} 판정이 없다")
+
+    check_profile_evidence(results, profile)
+    return EligibilityResult(
+        job_id=gate.job_id,
+        gate_ranking_group=gate.ranking_group,
+        as_of_month=profile.as_of_month,
+        extraction_issues=list(extraction_issues),
+        requirements=requirements,
+        requirement_results=results,
+    )
