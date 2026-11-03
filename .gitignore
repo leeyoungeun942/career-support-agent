@@ -11,6 +11,8 @@ data/sample-jobs/*
 
 # 지원자 개인정보
 data/profiles/
+# 실행 결과 (프로필 원문 인용이 들어 있음)
+data/results/
 *.private.*
 
 # 파이썬
