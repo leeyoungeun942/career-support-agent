@@ -11,9 +11,12 @@ from core.rules import (
     experience_months,
     is_adjacent,
     judge_career_years,
+    judge_education,
+    judge_major,
     month_set,
+    normalize_major,
 )
-from core.schemas import EligibilityProfile, EligibilityResult, Experience, JobRequirement, month_index
+from core.schemas import Education, EligibilityProfile, EligibilityResult, Experience, JobRequirement, month_index
 
 AS_OF = "2026-11"
 
@@ -349,3 +352,185 @@ def test_default_adjacent_pairs_match_job_gate_policy_table():
         if line.startswith("|") and len(cells) >= 4 and cells[3] == "사용":
             in_policy.add(frozenset({FAMILY_IDS[cells[0]], FAMILY_IDS[cells[1]]}))
     assert in_policy == set(ADJACENT_FAMILY_PAIRS)
+
+
+# ---------------------------------------------------------------------
+# 학력 요건 판정 (정책 6장)
+# ---------------------------------------------------------------------
+def edu_req(min_degree="bachelor", allows_graduating=False, id="R1"):
+    return JobRequirement(id=id, level="required", type="numeric", text="학력 요건 원문", numeric_kind="education",
+                          min_degree=min_degree, allows_graduating=allows_graduating)
+
+
+def edu(degree, status="graduated", majors=(), raw=None):
+    return Education(degree=degree, status=status, majors=list(majors), raw=raw)
+
+
+def eprof(*education):
+    return EligibilityProfile(as_of_month=AS_OF, education=list(education))
+
+
+def test_education_met_by_graduated_degree_with_raw_evidence():
+    p = eprof(edu("bachelor", raw="OO대학교 영어영문학과 졸업 (2026.02)"))
+    result = judge_education(edu_req("associate"), p)
+    check(result, "met", compared="학사 졸업 ≥ 전문학사")
+    assert [(e.field, e.quote) for e in result.profile_evidence] == [("education[0]", "OO대학교 영어영문학과 졸업 (2026.02)")]
+    assert result.question_for_user is None
+
+
+def test_education_equal_degree_is_met():
+    check(judge_education(edu_req("bachelor"), eprof(edu("bachelor"))), "met", compared="학사 졸업 ≥ 학사")
+
+
+def test_education_without_raw_has_no_evidence():
+    assert judge_education(edu_req("bachelor"), eprof(edu("bachelor"))).profile_evidence == []
+
+
+def test_education_uses_highest_graduated_degree():
+    p = eprof(edu("associate", raw="전문대"), edu("master", raw="대학원"), edu("bachelor", raw="학부"))
+    result = judge_education(edu_req("bachelor"), p)
+    check(result, "met", compared="석사 졸업 ≥ 학사")
+    assert [e.field for e in result.profile_evidence] == ["education[1]"]
+
+
+def test_education_below_threshold_not_met():
+    result = judge_education(edu_req("bachelor"), eprof(edu("high_school", raw="OO고등학교 졸업")))
+    check(result, "not_met", "below_threshold", "고졸 < 학사")
+    assert [e.field for e in result.profile_evidence] == ["education[0]"]
+
+
+@pytest.mark.parametrize("status", ["enrolled", "dropped"])
+def test_enrolled_or_dropped_does_not_count_as_degree(status):
+    check(judge_education(edu_req("bachelor"), eprof(edu("bachelor", status))), "not_met", "below_threshold", "졸업 학력 없음 < 학사")
+
+
+def test_enrolled_bachelor_falls_back_to_graduated_lower_degree():
+    p = eprof(edu("high_school"), edu("bachelor", "enrolled"))
+    check(judge_education(edu_req("bachelor"), p), "not_met", "below_threshold", "고졸 < 학사")
+
+
+def test_graduating_met_when_posting_allows_it():
+    result = judge_education(edu_req("bachelor", allows_graduating=True), eprof(edu("bachelor", "graduating", raw="OO대 졸업예정")))
+    check(result, "met", compared="학사 졸업예정 ≥ 학사")
+    assert [e.field for e in result.profile_evidence] == ["education[0]"]
+
+
+def test_graduating_needs_check_when_posting_is_silent():
+    result = judge_education(edu_req("bachelor"), eprof(edu("high_school"), edu("bachelor", "graduating", raw="OO대 졸업예정")))
+    check(result, "needs_check", "graduation_pending", "고졸 < 학사")
+    assert "졸업 예정자 지원 가능 여부" in result.question_for_user
+    assert [e.field for e in result.profile_evidence] == ["education[1]"]
+
+
+def test_graduating_only_pending_compared_has_no_graduated_degree():
+    check(judge_education(edu_req("bachelor"), eprof(edu("bachelor", "graduating"))),
+          "needs_check", "graduation_pending", "졸업 학력 없음 < 학사")
+
+
+def test_graduated_degree_that_meets_wins_over_graduating():
+    p = eprof(edu("bachelor"), edu("master", "graduating"))
+    check(judge_education(edu_req("bachelor"), p), "met", compared="학사 졸업 ≥ 학사")
+
+
+def test_graduating_below_threshold_is_not_met():
+    check(judge_education(edu_req("master", allows_graduating=True), eprof(edu("bachelor"), edu("associate", "graduating"))),
+          "not_met", "below_threshold", "학사 < 석사")
+
+
+def test_empty_education_is_no_profile_info():
+    result = judge_education(edu_req("bachelor"), eprof())
+    check(result, "needs_check", "no_profile_info")
+    assert result.question_for_user == "학력 정보를 입력해 주세요"
+
+
+def test_judge_education_rejects_other_kinds():
+    with pytest.raises(ValueError):
+        judge_education(career_req(3), eprof())
+
+
+# ---------------------------------------------------------------------
+# 전공 요건 판정 (정책 7장)
+# ---------------------------------------------------------------------
+def major_req(*names, id="R1"):
+    return JobRequirement(id=id, level="required", type="numeric", text="전공 요건 원문", numeric_kind="major",
+                          major_names=list(names))
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("경제 학과", "경제학"), ("경제학과", "경제학"), ("경제학부", "경제학"), ("경제학 전공", "경제학"),
+    ("경제학과 전공", "경제학"), ("컴퓨터공학부", "컴퓨터공학"), ("  경제학  ", "경제학"), ("경제학", "경제학"),
+    ("컴퓨터과학", "컴퓨터과학"), ("통계", "통계"),
+])
+def test_normalize_major(raw, expected):
+    assert normalize_major(raw) == expected
+
+
+def test_major_met_after_normalizing_both_sides():
+    result = judge_major(major_req("경제학 전공"), eprof(edu("bachelor", majors=["경제학과"], raw="OO대 경제학과 졸업")))
+    check(result, "met", compared="경제학과 = 경제학 전공")
+    assert [e.field for e in result.profile_evidence] == ["education[0]"]
+
+
+def test_major_met_by_double_major_in_same_education():
+    result = judge_major(major_req("경제학"), eprof(edu("bachelor", majors=["경영학", "경제학"], raw="경영학·경제학")))
+    check(result, "met", compared="경제학 = 경제학")
+
+
+def test_major_met_by_second_education_entry():
+    p = eprof(edu("bachelor", majors=["경영학"], raw="학부"), edu("master", majors=["경제학과"], raw="대학원"))
+    result = judge_major(major_req("경제학"), p)
+    check(result, "met", compared="경제학과 = 경제학")
+    assert [e.field for e in result.profile_evidence] == ["education[1]"]
+
+
+def test_major_any_of_required_names():
+    check(judge_major(major_req("경제학", "통계학"), eprof(edu("bachelor", majors=["통계학과"]))), "met", compared="통계학과 = 통계학")
+
+
+@pytest.mark.parametrize("have", ["경제통계학", "경영학", "컴퓨터과학"])
+def test_different_major_name_is_needs_check_never_not_met(have):
+    result = judge_major(major_req("경제학"), eprof(edu("bachelor", majors=[have], raw="원문")))
+    check(result, "needs_check", "scope_unclear", f"{have} ≠ 경제학")
+    assert result.question_for_user == f"이 공고는 경제학 전공을 요구합니다. {have} 전공으로 지원할 수 있는지 공고를 확인해 보세요"
+    assert [e.field for e in result.profile_evidence] == ["education[0]"]
+
+
+def test_computer_science_vs_computer_engineering_is_not_decided_by_code():
+    result = judge_major(major_req("컴퓨터공학"), eprof(edu("bachelor", majors=["컴퓨터과학"])))
+    check(result, "needs_check", "scope_unclear", "컴퓨터과학 ≠ 컴퓨터공학")
+
+
+def test_major_scope_unclear_lists_all_majors_and_names():
+    p = eprof(edu("bachelor", majors=["경영학", "심리학"], raw="학부"), edu("master", majors=["통계학"], raw="대학원"))
+    result = judge_major(major_req("경제학", "컴퓨터공학"), p)
+    check(result, "needs_check", "scope_unclear", "경영학, 심리학, 통계학 ≠ 경제학, 컴퓨터공학")
+    assert [e.field for e in result.profile_evidence] == ["education[0]", "education[1]"]
+
+
+@pytest.mark.parametrize("education", [[], [edu("bachelor")], [edu("bachelor", majors=[]), edu("master")]])
+def test_empty_major_is_no_profile_info(education):
+    result = judge_major(major_req("경제학"), eprof(*education))
+    check(result, "needs_check", "no_profile_info")
+    assert result.question_for_user == "전공을 입력해 주세요"
+
+
+def test_major_is_judged_regardless_of_graduation_status():
+    """학력 수준(졸업 여부)은 6장이 따로 판정한다. 전공은 모든 education 항목을 본다."""
+    check(judge_major(major_req("경제학"), eprof(edu("bachelor", "enrolled", majors=["경제학"]))), "met", compared="경제학 = 경제학")
+
+
+def test_judge_major_rejects_other_kinds():
+    with pytest.raises(ValueError):
+        judge_major(edu_req(), eprof())
+
+
+def test_equal_graduated_degrees_cite_the_earlier_entry():
+    """정책 6장: 같은 학력이 여럿이면 education에서 앞선 항목을 쓴다."""
+    p = eprof(edu("bachelor", raw="앞선 학사"), edu("bachelor", raw="뒤의 학사"))
+    assert [(e.field, e.quote) for e in judge_education(edu_req("bachelor"), p).profile_evidence] == [("education[0]", "앞선 학사")]
+
+
+def test_non_integer_month_threshold_rounds_up():
+    """0.7년 = 8.4개월. 정수 개월 합계는 9개월부터 충족이다."""
+    check(judge_career_years(career_req(0.7), prof(job("a", "2026-01", "2026-08", SP))), "not_met", "below_threshold", "8개월 < 9개월(0.7년)")
+    check(judge_career_years(career_req(0.7), prof(job("a", "2026-01", "2026-09", SP))), "met", compared="9개월 ≥ 9개월")

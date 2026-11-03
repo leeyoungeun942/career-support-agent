@@ -7,6 +7,8 @@ import math
 from collections.abc import Collection, Iterable
 
 from core.schemas import (
+    DEGREE_ORDER,
+    Education,
     EligibilityProfile,
     Experience,
     JobRequirement,
@@ -65,6 +67,9 @@ ADJACENT_FAMILY_PAIRS: frozenset[frozenset[str]] = frozenset({
 # 코드가 정하는 질문 문구 (3-1)
 QUESTION_NO_THRESHOLD = "이 공고는 경력 기준을 적지 않았습니다. 인턴 경력이 포함되는지 공고에 확인해 보세요"
 QUESTION_NO_EXPERIENCE = "인턴·정규직·계약직 경험이 있으면 입력해 주세요"
+QUESTION_NO_EDUCATION = "학력 정보를 입력해 주세요"
+QUESTION_NO_MAJOR = "전공을 입력해 주세요"
+QUESTION_GRADUATION_PENDING = "이 공고는 졸업 예정자 지원 가능 여부를 적지 않았습니다. 지원할 수 있는지 공고를 확인해 보세요"
 
 
 def _titles(experiences: Iterable[Experience]) -> str:
@@ -78,14 +83,15 @@ def _rule_result(
     compared: str | None = None,
     used: Iterable[Experience] = (),
     question: str | None = None,
+    evidence: Iterable[ProfileEvidence] = (),
 ) -> RequirementResult:
-    """코드가 낸 판정. 근거는 판정에 쓴 경험의 title을 인용한다 (13장)."""
+    """코드가 낸 판정. 근거는 판정에 쓴 경험의 title(또는 학력의 raw)을 인용한다 (13장)."""
     return RequirementResult(
         requirement_id=req.id,
         status=status,
         reason_code=reason,
         compared=compared,
-        profile_evidence=[ProfileEvidence(experience_id=e.id, quote=e.title) for e in used],
+        profile_evidence=[ProfileEvidence(experience_id=e.id, quote=e.title) for e in used] + list(evidence),
         evidence_checked_by="rule",
         status_decided_by="rule",
         question_for_user=question,
@@ -147,3 +153,92 @@ def judge_career_years(
             )
 
     return _rule_result(req, "not_met", "below_threshold", compared=shortfall, used=first)
+
+
+# =====================================================================
+# 학력·전공 요건 판정 (eligibility.md 6, 7장)
+# =====================================================================
+
+DEGREE_LABELS = {"high_school": "고졸", "associate": "전문학사", "bachelor": "학사", "master": "석사", "doctorate": "박사"}
+
+
+def _education_evidence(profile: EligibilityProfile, *indexes: int) -> list[ProfileEvidence]:
+    """학력 항목의 raw 인용. raw가 없는 항목은 인용하지 않는다 (1-2)."""
+    return [
+        ProfileEvidence(field=f"education[{i}]", quote=profile.education[i].raw)
+        for i in indexes if profile.education[i].raw
+    ]
+
+
+def _highest(profile: EligibilityProfile, status: str) -> tuple[int, Education] | None:
+    """status가 같은 학력 중 가장 높은 것. 같으면 앞선 항목."""
+    found = [(i, e) for i, e in enumerate(profile.education) if e.status == status]
+    return max(found, key=lambda pair: (DEGREE_ORDER[pair[1].degree], -pair[0]), default=None)
+
+
+def judge_education(req: JobRequirement, profile: EligibilityProfile) -> RequirementResult:
+    """학력 요건 판정. 졸업한 학력 중 가장 높은 것과 비교하고, 못 미치면 졸업 예정 학력을 본다 (6장)."""
+    if req.numeric_kind != "education":
+        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 학력 판정 대상이 아니다")
+    if not profile.education:
+        return _rule_result(req, "needs_check", "no_profile_info", question=QUESTION_NO_EDUCATION)
+
+    need = DEGREE_ORDER[req.min_degree]
+    need_label = DEGREE_LABELS[req.min_degree]
+    graduated = _highest(profile, "graduated")  # 재학·중퇴는 그 학력을 갖지 않은 것으로 본다
+    if graduated and DEGREE_ORDER[graduated[1].degree] >= need:
+        i, edu = graduated
+        return _rule_result(
+            req, "met", compared=f"{DEGREE_LABELS[edu.degree]} 졸업 ≥ {need_label}",
+            evidence=_education_evidence(profile, i),
+        )
+
+    shortfall = f"{DEGREE_LABELS[graduated[1].degree] if graduated else '졸업 학력 없음'} < {need_label}"
+    graduating = _highest(profile, "graduating")
+    if graduating and DEGREE_ORDER[graduating[1].degree] >= need:
+        i, edu = graduating
+        if req.allows_graduating:
+            return _rule_result(
+                req, "met", compared=f"{DEGREE_LABELS[edu.degree]} 졸업예정 ≥ {need_label}",
+                evidence=_education_evidence(profile, i),
+            )
+        return _rule_result(
+            req, "needs_check", "graduation_pending", compared=shortfall, question=QUESTION_GRADUATION_PENDING,
+            evidence=_education_evidence(profile, i),
+        )
+    return _rule_result(
+        req, "not_met", "below_threshold", compared=shortfall,
+        evidence=_education_evidence(profile, graduated[0]) if graduated else (),
+    )
+
+
+def normalize_major(name: str) -> str:
+    """전공명 정리 (7-2): 공백 제거, 끝의 "전공" 제거, "학과"·"학부"는 "학"만 남긴다. 그 밖의 유사성은 판단하지 않는다."""
+    name = "".join(name.split())
+    name = name.removesuffix("전공")
+    if name.endswith(("학과", "학부")):
+        name = name[:-1]
+    return name
+
+
+def judge_major(req: JobRequirement, profile: EligibilityProfile) -> RequirementResult:
+    """전공 요건 판정. 정리한 이름이 정확히 같을 때만 충족이고, 다르면 미충족이 아니라 확인 필요다 (7장)."""
+    if req.numeric_kind != "major":
+        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 전공 판정 대상이 아니다")
+    with_majors = [i for i, e in enumerate(profile.education) if e.majors]
+    if not with_majors:
+        return _rule_result(req, "needs_check", "no_profile_info", question=QUESTION_NO_MAJOR)
+
+    wanted = {normalize_major(n): n for n in req.major_names}
+    for i in with_majors:
+        for major in profile.education[i].majors:
+            if (hit := wanted.get(normalize_major(major))) is not None:
+                return _rule_result(req, "met", compared=f"{major} = {hit}", evidence=_education_evidence(profile, i))
+
+    have = ", ".join(m for i in with_majors for m in profile.education[i].majors)
+    names = ", ".join(req.major_names)
+    return _rule_result(
+        req, "needs_check", "scope_unclear", compared=f"{have} ≠ {names}",
+        question=f"이 공고는 {names} 전공을 요구합니다. {have} 전공으로 지원할 수 있는지 공고를 확인해 보세요",
+        evidence=_education_evidence(profile, *with_majors),
+    )

@@ -685,6 +685,7 @@ class Education(BaseModel):
     majors: list[str] = Field(default=[], description="주전공·복수전공·부전공")
     status: EducationStatus
     graduation_month: Month | None = None
+    raw: str | None = Field(default=None, description="프로필 원문 한 줄. 학력·전공 판정의 근거 인용에만 쓴다")
 
 
 class ExperiencePeriod(BaseModel):
