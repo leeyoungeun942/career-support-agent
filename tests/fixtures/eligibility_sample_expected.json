@@ -1,0 +1,116 @@
+{
+  "_comment": "가상 프로필. 실제 지원자 정보 금지. 요건 문장은 공고 원문이 아니라 docs/policies/eligibility.md 17장의 요건 요약이다.",
+  "as_of_month": "2026-11",
+  "profile": {
+    "education": [{"degree": "bachelor", "majors": ["영어영문학"], "status": "graduated", "graduation_month": "2026-02"}],
+    "experiences": [
+      {"id": "exp-1", "title": "B2B AI 사업부 기획팀 인턴", "type": "intern", "category": "JF_SERVICE_PLANNING",
+       "period": {"start": "2025-07", "end": "2025-12"}}
+    ],
+    "skills": ["Figma", "Notion", "Excel", "SQL 기초"],
+    "certificates": ["ADsP", "TOEIC Speaking IH"]
+  },
+  "samples": [
+    {
+      "number": 1, "job_id": "sample-1", "gate_ranking_group": "primary",
+      "expected": {"verdict": "not_eligible", "decisive": ["1-R2"]},
+      "requirements": [
+        {"id": "1-R1", "level": "required", "type": "numeric", "text": "대졸 이상", "numeric_kind": "education", "min_degree": "associate",
+         "interpretation_note": "연수 표시가 없어 전문학사 이상으로 해석",
+         "status": "met", "compared": "학사 졸업 ≥ 전문학사"},
+        {"id": "1-R2", "level": "required", "type": "numeric", "text": "서비스 기획 경력 3년 이상", "numeric_kind": "career_years",
+         "min_value": 3, "career_family": "JF_SERVICE_PLANNING", "career_family_basis": "stated", "origin": "split",
+         "status": "not_met", "reason_code": "below_threshold", "compared": "6개월 < 36개월(3년)"},
+        {"id": "1-R3", "level": "required", "type": "qualitative", "text": "앱/웹 서비스 출시 경험", "origin": "split",
+         "status": "needs_check", "reason_code": "scope_unclear"},
+        {"id": "1-R4", "level": "required", "type": "qualitative", "text": "사용자 리서치/미팅", "status": "met"},
+        {"id": "1-R5", "level": "required", "type": "qualitative", "text": "MCP, AI 에이전트, RAG 개념 이해·기획 적용",
+         "status": "needs_check", "reason_code": "scope_unclear"},
+        {"id": "1-R6", "level": "required", "type": "qualitative", "text": "복잡한 로직의 문서화", "status": "met"},
+        {"id": "1-R7", "level": "required", "type": "qualitative", "text": "데이터 기반 의사결정 경험",
+         "status": "needs_check", "reason_code": "scope_unclear"}
+      ]
+    },
+    {
+      "number": 2, "job_id": "sample-2", "gate_ranking_group": "job_mismatch",
+      "expected": {"verdict": "not_eligible", "decisive": ["2-R1"]},
+      "requirements": [
+        {"id": "2-R1", "level": "required", "type": "numeric", "text": "Python 개발 경력 3년 내외", "numeric_kind": "career_years",
+         "min_value": 2, "career_family": "JF_DEV", "career_family_basis": "stated",
+         "status": "not_met", "reason_code": "below_threshold", "compared": "0개월 < 24개월(2년)"},
+        {"id": "2-R2", "level": "required", "type": "skill", "text": "FastAPI 등 API 개발 경험",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "2-R3", "level": "required", "type": "skill", "text": "LLM API 호출·프롬프트 작성",
+         "status": "needs_check", "reason_code": "scope_unclear"},
+        {"id": "2-R4", "level": "required", "type": "skill", "text": "LLM 출력 파싱·검증·실패 처리 구현",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "2-R5", "level": "required", "type": "skill", "text": "REST API 연동·명세 기반 개발",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "2-R6", "level": "required", "type": "skill", "text": "테스트 코드 작성 (pytest 등)",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "2-R7", "level": "required", "type": "skill", "text": "Git 협업",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "2-P1", "level": "preferred", "type": "preference", "text": "추측으로 메우지 않고 확인하는 태도", "status": null}
+      ]
+    },
+    {
+      "number": 3, "job_id": "sample-3", "gate_ranking_group": "primary",
+      "expected": {"verdict": "conditional", "decisive": ["3-R4"]},
+      "requirements": [
+        {"id": "3-R1", "level": "required", "type": "numeric", "text": "신입 / 경력 ~3년", "numeric_kind": "career_years",
+         "min_value": 0, "max_value": 3, "status": "met", "compared": "6개월 ≥ 0개월"},
+        {"id": "3-R2", "level": "required", "type": "numeric", "text": "대학교졸업(4년) 이상, 졸업 예정자 가능", "numeric_kind": "education",
+         "min_degree": "bachelor", "allows_graduating": true, "status": "met", "compared": "학사 졸업 ≥ 학사"},
+        {"id": "3-R3", "level": "required", "type": "qualitative", "text": "문서·데이터·콘텐츠 구조화 경험", "status": "met"},
+        {"id": "3-R4", "level": "required", "type": "qualitative", "text": "생성형 AI 도구를 자유자재로 활용",
+         "status": "needs_check", "reason_code": "level_unclear"}
+      ]
+    },
+    {
+      "number": 4, "job_id": "sample-4", "gate_ranking_group": "job_mismatch",
+      "expected": {"verdict": "conditional", "decisive": ["4-R1", "4-R2", "4-R3"]},
+      "requirements": [
+        {"id": "4-R1", "level": "required", "type": "numeric", "text": "경력 (연차 무관, 실무 프로젝트 경험)", "numeric_kind": "career_years",
+         "min_value": null, "status": "needs_check", "reason_code": "no_threshold"},
+        {"id": "4-R2", "level": "required", "type": "skill", "text": "Python 실무 경험",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "4-R3", "level": "required", "type": "qualitative", "text": "LLM 기반 프로젝트 경험",
+         "status": "needs_check", "reason_code": "scope_unclear"}
+      ]
+    },
+    {
+      "number": 5, "job_id": "sample-5", "gate_ranking_group": "job_mismatch",
+      "expected": {"verdict": "conditional", "decisive": ["5-R4"]},
+      "requirements": [
+        {"id": "5-R1", "level": "required", "type": "numeric", "text": "경력 무관 (신입 지원 가능)", "numeric_kind": "career_years",
+         "min_value": 0, "status": "met", "compared": "6개월 ≥ 0개월"},
+        {"id": "5-R2", "level": "required", "type": "numeric", "text": "대학졸업(2,3년) 이상, 졸업 예정자 가능", "numeric_kind": "education",
+         "min_degree": "associate", "allows_graduating": true, "status": "met", "compared": "학사 졸업 ≥ 전문학사"},
+        {"id": "5-R3", "level": "required", "type": "skill", "combine": "any_of",
+         "text": "보유역량: 영어가능자, 해당직무 인턴경력, 운전가능자, 차량소지자, 해당직무 알바경험, 해당직무 근무경험",
+         "items": [{"index": 0, "text": "영어가능자"}, {"index": 1, "text": "해당직무 인턴경력"}, {"index": 2, "text": "운전가능자"},
+                   {"index": 3, "text": "차량소지자"}, {"index": 4, "text": "해당직무 알바경험"}, {"index": 5, "text": "해당직무 근무경험"}],
+         "interpretation_note": "'모두 필수'라는 말이 없어 하나 이상 충족으로 해석",
+         "item_statuses": [["met", null], ["needs_check", "no_profile_info"], ["needs_check", "no_profile_info"],
+                           ["needs_check", "no_profile_info"], ["needs_check", "no_profile_info"], ["needs_check", "no_profile_info"]]},
+        {"id": "5-R4", "level": "required", "type": "skill", "text": "2종보통운전면허(오토)",
+         "status": "needs_check", "reason_code": "no_profile_info"}
+      ]
+    },
+    {
+      "number": 6, "job_id": "sample-6", "gate_ranking_group": "job_mismatch",
+      "expected": {"verdict": "not_eligible", "decisive": ["6-R1"]},
+      "requirements": [
+        {"id": "6-R1", "level": "required", "type": "numeric", "text": "경영기획 분야 1~2년 경험", "numeric_kind": "career_years",
+         "min_value": 1, "max_value": 2, "career_family": "JF_MGMT_PLANNING", "career_family_basis": "stated",
+         "status": "not_met", "reason_code": "below_threshold", "compared": "0개월 < 12개월(1년)"},
+        {"id": "6-R2", "level": "required", "type": "skill", "text": "데이터 관리(Excel) 능숙",
+         "status": "needs_check", "reason_code": "level_unclear"},
+        {"id": "6-R3", "level": "required", "type": "skill", "text": "보고서 작성(PPT) 능숙",
+         "status": "needs_check", "reason_code": "no_profile_info"},
+        {"id": "6-R4", "level": "required", "type": "qualitative", "text": "커뮤니케이션 능력, 실행력",
+         "status": "needs_check", "reason_code": "scope_unclear"}
+      ]
+    }
+  ]
+}

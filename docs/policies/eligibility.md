@@ -68,7 +68,7 @@
 | 공고의 요건 목록 `JobRequirement` | 요건 추출 (13장 1단계) | 모든 판정 |
 | 요건 추출 상태 `extraction_status`, `extraction_issues[]` | 요건 추출 (13장 1단계) | "필수 요건 없음"의 안전장치 (1-4) |
 | 지원자 프로필 | 사용자 입력 | 1-2 표 |
-| `job_id`, `ranking_group` | 직무 게이트 결과 ([data-contract.md](../data-contract.md) 1장) | 결과 연결, 14장 정렬 |
+| `job_id`, `ranking_group` | 직무 게이트 결과 ([data-contract.md](../data-contract.md) 1장) | 결과 연결, 14장 정렬. 결과에는 `gate_ranking_group`으로 복사한다 |
 | `as_of_month` (`"YYYY-MM"`) | pipeline. 평소에는 오늘이 속한 달 | 11장 기간 계산 |
 
 - **모든 공고를 평가한다.** 게이트 결과는 판정을 바꾸지 않는다. 게이트에서 받는 것은 `job_id`와 `ranking_group`뿐이다.
@@ -108,18 +108,20 @@
 
 그래서 요건 추출 단계는 요건 목록과 함께 **추출 상태**를 낸다. 지원자 정보가 아니라 공고 분석이 끝났는지를 나타내는 값이다.
 
-| `extraction_status` | 뜻 | 정하는 쪽 |
+| `extraction_status` | 뜻 |
 |---|---|---|
-| `complete` | 공고 원문을 끝까지 읽었고, 자격요건 칸(또는 "이런 분을 찾아요"처럼 그에 준하는 칸)에서 요건을 모두 뽑았다. 칸에 "무관"만 있어 요건이 0개여도 `complete`다 | 요건 추출(LLM)이 제안 |
-| `incomplete` | 아래 `extraction_issues` 중 하나라도 있다 | 코드가 강제로 내림 |
+| `complete` | 공고 원문을 끝까지 읽었고, 자격요건 칸(또는 "이런 분을 찾아요"처럼 그에 준하는 칸)에서 요건을 모두 뽑았다. 칸에 "무관"만 있어 요건이 0개여도 `complete`다 |
+| `incomplete` | 아래 `extraction_issues` 중 하나라도 있다 |
 
 | `extraction_issues` | 조건 | 사용자에게 보여 줄 문구 예 |
 |---|---|---|
-| `text_unreadable` | 공고 원문이 잘렸거나 이미지라 읽지 못했다 | "공고 원문을 다 읽지 못했습니다" |
+| `text_unreadable` | 공고 원문이 잘렸거나 이미지라 읽지 못했다. 자격요건 칸이 있었는지도 알 수 없다 | "공고 원문을 다 읽지 못했습니다" |
 | `extraction_failed` | 요건 추출 LLM 호출이나 결과 해석이 실패했다 | "자격요건을 분석하지 못했습니다" |
-| `no_requirement_section` | 자격요건 칸과 그에 준하는 칸을 찾지 못했다 | "공고에 자격요건이 적혀 있지 않습니다. 원문을 확인해 주세요" |
+| `no_requirement_section` | 원문은 읽었는데 자격요건 칸과 그에 준하는 칸이 없다 |
+| `partial_extraction` | 자격요건 칸은 읽었지만 요건 일부를 뽑지 못했거나, 조건부 문장처럼 해석하지 못한 문장이 있다 | "일부 자격요건을 분석하지 못했습니다. 원문을 확인해 주세요" |
+| `required_preferred_ambiguous` | 필수와 우대를 구분할 수 없다 (칸 이름이 없거나 섞여 있다) | "필수와 우대 구분이 불명확합니다. 원문을 확인해 주세요" | "공고에 자격요건이 적혀 있지 않습니다. 원문을 확인해 주세요" |
 
-- LLM이 `complete`라고 해도, 코드는 위 조건을 직접 확인해 하나라도 있으면 `incomplete`로 바꾼다. 반대로 코드가 `incomplete`를 `complete`로 올리지는 않는다.
+- **상태는 문제 목록에서 계산한다.** 요건 추출(LLM)과 코드는 `extraction_issues`만 적는다. 코드는 LLM이 적지 않은 문제도 직접 확인해 추가한다. 문제가 하나도 없으면 `complete`, 하나라도 있으면 `incomplete`다. 상태를 따로 입력받지 않으므로 "`complete`인데 문제가 있음" 같은 모순이 생기지 않는다.
 - **`incomplete`이어도 평가를 멈추지 않는다.** 결과는 정상적으로 만들고 정렬·적합성 평가도 그대로 진행한다. 사용자에게는 결과 옆에 안내 문구(위 표)만 보여 준다. 사용자가 답하기를 기다리지 않는다.
 - **`incomplete`이면 `eligible`을 내지 않는다.** 원래 `eligible`이었을 결과는 `conditional`이 된다. 이미 확인된 미충족은 추출이 불완전해도 사실이므로 `not_eligible`은 그대로 둔다 (13장 종합 판정).
 - 공고별 경우 정리:
@@ -146,9 +148,9 @@
 | 요건 출처 `origin` | `original` / `split` | 공고 그대로 / 사람이 나눔 |
 | 판정 주체 | `rule` / `ai` / `user` | 규칙 / AI / 사용자 |
 | 요건 추출 상태 `extraction_status` | `complete` / `incomplete` | 추출 완료 / 추출 불완전 |
-| 추출 문제 `extraction_issues` | `text_unreadable` / `extraction_failed` / `no_requirement_section` | 원문 읽기 실패 / 추출 실패 / 자격요건 칸 없음 |
+| 추출 문제 `extraction_issues` (필수 요건이 없다고 확정할 수 없게 만드는 문제만 적는다) | `text_unreadable` / `extraction_failed` / `no_requirement_section` / `partial_extraction` / `required_preferred_ambiguous` | 원문 읽기 실패 / 추출 실패 / 자격요건 칸 없음 / 요건 일부만 추출됨 / 필수·우대 구분 불명확 |
 
-- **`any_of` 요건은 항목별 결과(`item_results`)를 남긴다.** 항목마다 요건 하나처럼 `status`, 사유, 근거를 매긴다. 요건 전체의 상태는 코드가 항목 결과에서 계산한다: 하나라도 `met`이면 `met`, 전부 `not_met`이면 `not_met`, 그 밖에는 `needs_check`.
+- **`any_of` 요건은 항목별 결과(`item_results`)를 남긴다.** 항목마다 요건 하나처럼 `status`, 사유, 근거를 매긴다. `any_of`는 `skill`·`qualitative` 요건에만 쓴다. 값 비교(`numeric`) 항목을 섞는 사례는 아직 없다("신입 / 경력 N년 이상"은 5-1에서 `any_of` 없이 처리한다). 요건 전체의 상태는 코드가 항목 결과에서 계산한다: 하나라도 `met`이면 `met`, 전부 `not_met`이면 `not_met`, 그 밖에는 `needs_check`.
   - 합친 상태만 남기면 어느 항목이 충족됐는지 보여 줄 수 없고, 사용자가 한 항목에 답했을 때 다시 계산할 수 없고, `not_met`의 원인(`below_threshold`인지 `user_denied`인지)을 잃는다. 그래서 항목별 결과를 결과에 그대로 저장한다.
   - 합친 요건의 사유 코드는 항목 사유에서 코드가 고른다. 고르는 규칙은 data-contract 2장에서 정한다.
 - **진행 중인 경험**이나 **상한**처럼 형식에 칸이 필요한 규칙은 해당 장에서 정한 뒤 data-contract 2장에 반영한다.
@@ -196,7 +198,7 @@
 | 사유 코드 | 화면 문구 | 허용 조건 |
 |---|---|---|
 | `below_threshold` | 기준 미달 | `numeric` 요건이고 `status_decided_by=rule`일 때만 |
-| `user_denied` | 사용자가 없다고 답함 | `status_decided_by=user`일 때만. `skill`, `qualitative`가 `not_met`이 되는 유일한 길 |
+| `user_denied` | 사용자가 없다고 답함 | `skill`, `qualitative` 요건이고 `status_decided_by=user`일 때만. `skill`, `qualitative`가 `not_met`이 되는 유일한 길 |
 
 - 사용자가 확인 필요 항목에 답하면 `status_decided_by=user`로 바뀐다. "있다"는 `met`, "없다"는 `not_met` + `user_denied`다.
 - `met`에는 사유 코드가 없다.
@@ -438,9 +440,9 @@
 - **결정적 요건:** `not_eligible`이면 `not_met`인 필수 요건 전부, `conditional`이면 `needs_check`인 필수 요건 전부, `eligible`이면 없음이다. 3번 경우처럼 추출 불완전 때문에 `conditional`이면 결정적 요건은 없고, `summary`가 `extraction_issues`를 보여 준다.
 - `summary`는 LLM이 쓰지 않는다. 코드가 판정 값을 템플릿에 넣어 만든다.
 - 근거는 원문 인용으로 남긴다. `job_quote`는 해당 요건 `text` 안에, 프로필 인용은 프로필 원문 안에 있어야 한다.
-- 근거를 찾은 주체(`evidence_found_by`)와 상태를 정한 주체(`status_decided_by`)는 따로 기록한다.
+- 근거를 찾으려고 프로필을 **확인한** 주체(`evidence_checked_by`)와 상태를 정한 주체(`status_decided_by`)는 따로 기록한다. 확인했지만 근거가 없었던 경우(`no_profile_info`)도 확인한 주체를 적는다. 아직 확인하지 않았으면 `null`이다.
 
-**비용 최적화 (후속):** 모든 공고를 평가하되, 1·2·4·5단계는 전부 실행하고 3단계(LLM 근거 찾기)만 필요할 때 실행하는 2단계 구조를 검토한다. 예: `job_mismatch` 그룹은 사용자가 펼칠 때 3단계를 실행한다. 이 계약은 3단계를 생략한 결과도 표현해야 한다: `evidence_found_by=null`이면 근거가 없고 `status=needs_check`다.
+**비용 최적화 (후속):** 모든 공고를 평가하되, 1·2·4·5단계는 전부 실행하고 3단계(LLM 근거 찾기)만 필요할 때 실행하는 2단계 구조를 검토한다. 예: `job_mismatch` 그룹은 사용자가 펼칠 때 3단계를 실행한다. 이 계약은 3단계를 생략한 결과도 표현해야 한다: `evidence_checked_by=null`이면 근거가 없고 `status=needs_check`다.
 
 ## 14. 순위와 표시
 
@@ -566,7 +568,8 @@
 
 ## 18. 검증 계획
 
-- **샘플 6건 회귀 테스트:** 17장의 요건별 상태로 결과를 만들어 종합 판정이 요약표와 같은지 확인한다 (`tests/test_schemas_eligibility.py`). 이 테스트는 종합 판정 계산만 확인하고, 요건별 상태를 만드는 코드는 후속 이슈(`core/rules.py`)에서 검증한다.
+- **샘플 6건 회귀 테스트:** 17장의 요건별 상태로 결과를 만들어 종합 판정이 요약표와 같은지 확인한다 (`tests/test_schemas_eligibility.py`). fixture의 요건별 상태가 17장 표와 같은지도 테스트가 이 문서의 표를 직접 읽어 대조한다. 이 테스트는 종합 판정 계산만 확인하고, 요건별 상태를 만드는 코드는 후속 이슈(`core/rules.py`)에서 검증한다.
+- **겹친 경력 합산 테스트 (`core/rules.py` 구현 때 필수):** 경험 A `2025-03 ~ 2025-06`과 경험 B `2025-05 ~ 2025-08`의 합계는 6개월이다(단순 합산은 8개월). 직무군이 같은 경험과 모르는 경험의 합집합(4장), 기준 월에서 자르기(11장)도 함께 확인한다. 합집합 계산은 `core/rules.py` 몫이라 스키마 테스트에는 없다.
 - **원티드 60건 자격요건 정답:** 후속. 직무 게이트 정답과 따로 기록한다 ([job-gate.md](job-gate.md) 6-2).
 - **검증용 공고에 `eligible`이 나오는 사례를 넣는다.**
 
@@ -606,6 +609,8 @@
 - [ ] 상한(5-3)을 엄격하게 적용하는 공고가 검증용 공고에 많은지 확인
 - [ ] 비용 최적화: LLM 근거 찾기를 필요할 때만 실행하는 2단계 구조 (13장)
 - [ ] `preference` 코드 이름을 `attitude`로 바꿀지 검토 (개선안 몫, 2장)
+- [ ] 후속: 자격요건 정답(원티드 60건) 초안을 만드는 skill 작성. 직무 게이트 정답과 따로 기록한다
+- [ ] 후속: 자기소개서 Agent가 이 결과의 근거(`profile_evidence`)를 읽는 방법
 
 ### 다른 문서에 반영할 것
 
@@ -614,10 +619,17 @@
 - [x] [job-gate.md](job-gate.md) 7-1의 "자격요건 종합" 칸을 이 문서 17장과 맞춤 (2026-11-03)
 - [x] [job-gate.md](job-gate.md) 8장: `Experience.category`에 직무군 ID를 쓴다고 명시함 (1-2)
 
-### 참고 출처 (이름만 적음)
+### 채택한 원칙과 참고 출처
 
-외부 자료는 참고이며, 프로젝트 정책과 다르면 이 문서가 우선한다 (AGENTS.md).
+외부 도구·skill을 이 프로젝트에 들이지 않는다. 아래 원칙만 채택하고 이 문서와 데이터 계약에 직접 적었다. 판정·점수·정렬은 `core/rules.py`가 하고, 외부 skill의 자연어 지침을 판정에 쓰지 않는다. 외부 자료는 참고이며, 프로젝트 정책과 다르면 이 문서가 우선한다 (AGENTS.md).
 
+| 채택한 원칙 | 이 문서 | 데이터 계약 |
+|---|---|---|
+| 근거는 원문 인용으로 남긴다 | 13장 (`job_quote`, 프로필 인용) | 공통 원칙, 2-3, 2-6 |
+| 근거 확인과 판정을 분리한다 | 13장 (`evidence_checked_by` / `status_decided_by`), 3장 사유 코드 | 2-3, 2-6 |
+| LLM과 코드의 역할을 나눈다 | 13장 | 2-2 계산값 |
+
+참고 출처 (이름만 적음)
 - career-ops: 요건 단위 근거 표, 판정과 신뢰도 분리
 - write-korean-cover-letter: 사실 장부 방식
 - Resume Matcher: 이번 범위 제외, 적합성 평가에서 참고
@@ -630,3 +642,6 @@
 - 2026-11-03: 저장소 형식으로 이전. 영어 코드(`met` 등)와 사유 코드(3장) 도입. 입력과 출력(1장), 추가 규칙(12장), 코드와 LLM 분담(13장), 순위와 표시(14장), 적합성 평가와의 연결(15장), 개인정보(16장) 신설. 모든 공고 평가와 "참고용 평가" 반영. 월 단위 기간 계산과 `as_of_month`(11장), `preferred`와 `preference` 구분(2장), Profile 칸 표(1-2) 추가
 - 2026-11-03: 검토 피드백 반영. 0-2에 "numeric 값 비교로만"의 해석 추가. 1-4 요건 추출 상태(`extraction_status`, `extraction_issues`)와 `incomplete`이면 `eligible` 금지. 2장 `any_of` 항목별 결과 저장. 3장 사유 고르는 순서. 4장 직무군 불명 경험 합산 단계. 5-1 "신입 / 경력 N년 이상", 5-2 경계값, 5-3 상한은 정책 의도. 7장 전공명 비교 경우와 코드 범위, `majors[]`. 11장 `compared` 개월 표기, 휴직·동시 경험
 - 2026-11-03: 4-1 "관련 경력" 신설 (B안: 공고 직무군으로 해석, `career_family_basis`, 인접 직무 보완, "동종 업계"는 확인 필요). 1-4에 `incomplete`여도 평가를 멈추지 않는다고 명시
+- 2026-11-03: 검토 반영. `evidence_found_by`를 `evidence_checked_by`로(확인한 주체), 결과의 `ranking_group` 복사 칸을 `gate_ranking_group`으로 바꿈. `extraction_issues`는 필수 요건 없음을 확정할 수 없게 만드는 문제만 적는다고 명시
+- 2026-11-03: data-contract 2장 작성에 맞춤. 1-4 추출 상태는 `extraction_issues`에서 계산하는 값으로 정리. 2장 `any_of`는 `skill`·`qualitative` 요건에만 쓴다고 명시
+- 2026-11-03: 코드 리뷰 반영. 3-2 `user_denied`는 `skill`·`qualitative` 요건에만. 1-4 `extraction_issues`에 `partial_extraction`, `required_preferred_ambiguous` 추가. 18장에 겹친 경력 합산 테스트(rules 구현 때 필수)와 fixture-정책 대조를 명시
