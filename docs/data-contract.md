@@ -37,7 +37,7 @@
   "detail": {
     "ended_at_step": 6,
     "core_ratio": {"count": 2, "total": 2},
-    "oos_items": {"count": 0, "total": 3},
+    "oos_items": {"count": 0, "total": 2},
     "evidence": {
       "supporting": [
         {"item_index": 0, "quote": "로드맵 수립", "source": "job_posting", "decided_by": "rule"},
@@ -66,12 +66,32 @@
             "ai_reason": null
           }
         ]
+      },
+      {
+        "index": 1,
+        "heading": "",
+        "text": "고객 VOC 기반 기능 개선 과제 도출",
+        "label": "JF_SERVICE_PLANNING",
+        "why": "공통이 아닌 하위 업무 1/1 중 1개가 같은 라벨 (과반)",
+        "subtasks": [
+          {
+            "text": "고객 VOC 기반 기능 개선 과제 도출",
+            "label": "JF_SERVICE_PLANNING",
+            "source": "rule",
+            "candidates": ["JF_SERVICE_PLANNING"],
+            "cues": {"JF_SERVICE_PLANNING": ["기능 개선"]},
+            "common_cues": [],
+            "context_rules": [],
+            "warnings": [],
+            "ai_reason": null
+          }
+        ]
       }
     ],
     "ai_log": [],
     "versions": {
-      "config_version": "2026-11-02.1",
-      "policy_revised": "2026-11-02",
+      "config_version": "2026-11-03.1",
+      "policy_revised": "2026-11-03",
       "map_modified": "2026-10-27",
       "ai_model": null,
       "prompt_version": null
@@ -115,6 +135,8 @@
 | `display_flag` | `job_scope_differs` / `job_needs_check` | 직무 범위 차이 / 직무 확인 필요 |
 | 업무 항목 라벨 | `JF_*` / `common` / `out_of_scope` / `mixed` | 직무군 이름 / 공통 / 범위외 / 혼합 |
 | `source`, `decided_by` | `rule` / `ai` | 규칙 / AI |
+
+- `category_differs`는 사람인 대분류 입력이 있을 때만 생기는 경고다. 대분류 입력이 아직 구현되지 않아(정책 8장 보류) 지금 코드는 이 경고를 만들지 않는다.
 
 **`reason_code`는 하나만 있다.** 판정은 5-1의 단계 순서대로 진행하고, 사유가 처음 생긴 단계에서 끝난다. 그래서 한 공고에 사유가 둘 생기지 않는다. 여러 사유가 겹쳐 보이는 공고라도 먼저 걸린 단계의 사유가 남는다. 우선순위는 단계 순서와 같다.
 
@@ -184,6 +206,8 @@
 | `decided_by` | 그 항목의 라벨을 규칙이 정했는지(`rule`) AI가 정했는지(`ai`) |
 
 `decided_by`가 `ai`여도 `quote`는 원문 인용이어야 한다. AI가 쓴 설명은 `ai_reason`과 `ai_log`에만 남기고 근거로 쓰지 않는다. `core/schemas.py`는 인용이 원문에 없으면 오류를 낸다.
+
+**근거를 만드는 규칙은 정책 5-4다.** 코드가 만들고, 인용은 하위 업무 원문 전체이며 한 항목에 1개다. 그래서 위 예시의 `"로드맵 수립"`처럼 구절로 좁힌 인용은 계약상 허용되지만 코드가 만드는 값은 아니다.
 
 ### 1-6. `summary` 템플릿
 
@@ -476,7 +500,7 @@
 | `core/schemas.py`, `tests/test_schemas_job_gate.py` | v1을 썼다 | v2로 바꿨다 |
 | 이 문서 1-1 예시 JSON | v1이었다 | v2 예시로 바꿨다 |
 | 저장된 v1 결과 파일·fixture | 없음 (`data/raw/eval_cases.json`은 정답 형식이고 게이트 결과 형식이 아니다) | 없음 |
-| 이전 작업 폴더 `3.spec/job_gate.py` | `proceed_to_eligibility`를 쓰지 않는다 | 이식할 때 v2로 출력한다 |
+| 이전 작업 폴더 `3.spec/job_gate.py` | `proceed_to_eligibility`를 쓰지 않는다 | 이식했다(2026-11-03, 이슈 #5): 판정은 `core/job_gate.py`, v2 변환은 `core/job_gate_result.py`. 출력에 `proceed_to_eligibility`가 없다 |
 
 소비자가 없으므로 **하위 호환 변환기는 만들지 않는다.** v1 입력이 들어오면 `schema_version` 검사에서 오류가 난다. 이것은 의도한 동작이다.
 
