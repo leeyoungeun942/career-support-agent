@@ -1,19 +1,19 @@
 {
-  "_comment": "샘플 공고 6건의 직무 게이트 기대 판정 (job-gate.md 7-1). 공고 원문은 들어 있지 않다. 원문은 data/sample-jobs/gate_sample_cases.json(커밋하지 않음)이며 번호(no)로 짝짓는다. item_labels는 회사 소개 문장(exclude)을 뺀 업무 항목의 기대 라벨이다.",
+  "_comment": "샘플 공고 6건의 직무 게이트 기대 판정 (job-gate.md 7-1). 공고 원문은 들어 있지 않다. 원문은 data/sample-jobs/gate_sample_cases.json(커밋하지 않음)이며 번호(no)로 짝짓는다. gate는 job_gate_result.v2의 result 코드다. item_labels는 회사 소개 문장(exclude)을 뺀 업무 항목의 기대 라벨이다(직무군 ID 또는 common).",
   "desired_family": "JF_SERVICE_PLANNING",
   "cases": [
     {
       "no": 1,
       "company": "팔레트(주)",
       "expected": {
-        "gate": "일치",
+        "gate": "match",
         "core_family": "JF_SERVICE_PLANNING"
       },
       "item_labels": [
         "JF_SERVICE_PLANNING",
         "JF_SERVICE_PLANNING",
-        "공통",
-        "공통"
+        "common",
+        "common"
       ],
       "excluded_item_count": 0
     },
@@ -21,7 +21,7 @@
       "no": 2,
       "company": "피피에스주식회사",
       "expected": {
-        "gate": "불일치",
+        "gate": "mismatch",
         "core_family": "JF_DEV"
       },
       "item_labels": [
@@ -30,7 +30,7 @@
         "JF_DEV",
         "JF_DEV",
         "JF_DEV",
-        "공통"
+        "common"
       ],
       "excluded_item_count": 0
     },
@@ -38,7 +38,7 @@
       "no": 3,
       "company": "이씨이십일알앤씨(주)",
       "expected": {
-        "gate": "일치",
+        "gate": "match",
         "core_family": "JF_SERVICE_PLANNING"
       },
       "item_labels": [
@@ -46,7 +46,7 @@
         "JF_SERVICE_PLANNING",
         "JF_SERVICE_PLANNING",
         "JF_SERVICE_PLANNING",
-        "공통"
+        "common"
       ],
       "excluded_item_count": 0
     },
@@ -54,7 +54,7 @@
       "no": 4,
       "company": "씨케이파트너스",
       "expected": {
-        "gate": "불일치",
+        "gate": "mismatch",
         "core_family": "JF_DEV"
       },
       "item_labels": [
@@ -67,7 +67,7 @@
       "no": 5,
       "company": "엠에프인터내셔날",
       "expected": {
-        "gate": "불일치",
+        "gate": "mismatch",
         "core_family": "JF_SALES"
       },
       "item_labels": [
@@ -80,14 +80,14 @@
       "no": 6,
       "company": "(주)이롬넷",
       "expected": {
-        "gate": "불일치",
+        "gate": "mismatch",
         "core_family": "JF_MGMT_PLANNING"
       },
       "item_labels": [
         "JF_MGMT_PLANNING",
-        "공통",
+        "common",
         "JF_MGMT_PLANNING",
-        "공통",
+        "common",
         "JF_MGMT_PLANNING",
         "JF_MGMT_PLANNING"
       ],

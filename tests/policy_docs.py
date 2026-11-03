@@ -132,6 +132,27 @@ def doc_common_cues():
     return cues
 
 
+def doc_last_revision_date():
+    """job-gate.md 개정 이력의 마지막 항목 날짜 ("- YYYY-MM-DD: ...")."""
+    dates = [m.group(1) for line in section(POLICY_MD.read_text(encoding="utf-8"), "## 개정 이력")
+             if (m := re.match(r"^- (\d{4}-\d{2}-\d{2}):", line))]
+    return dates[-1]
+
+
+def doc_latest_validation_row():
+    """job-gate.md 6-4 검증 결과 표의 마지막 행을 {열 이름: 값}으로 (설정값, 매핑표 수정일 등)."""
+    header, last = None, None
+    for line in section(POLICY_MD.read_text(encoding="utf-8"), "### 6-4."):
+        if not line.startswith("|"):
+            continue
+        cells = table_cells(line)
+        if cells[0] == "회차":
+            header = cells
+        elif header and cells[0].isdigit():
+            last = dict(zip(header, cells))
+    return last
+
+
 def doc_adjacent_pairs():
     """[(직무군 A, 직무군 B, 겹치는 업무, 상태)] (job-gate.md 4-2 표)."""
     pairs = []

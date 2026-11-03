@@ -6,7 +6,7 @@
 스텁 모드: AI 자리에 7-1 기대 항목 라벨을 넣어 규칙(단서 탐색·문맥 판별·공통 단서·과반·직무명 대조·인접)만 확인한다.
 단어 시작 경계, 항목 과반, 범위외 근거, 5-3 기준값 경계 테스트는 합성 공고를 써서 원문 없이도 돈다.
 
-이 단계(Step 3)는 원본 한글 출력을 그대로 쓴다. 영문 코드로의 전환은 Step 4다.
+판정·사유·경고·출처는 job_gate_result.v2의 영문 코드다(한글 표시는 DISPLAY_LABELS가 맡는다).
 """
 import json
 import re
@@ -18,6 +18,7 @@ import pytest
 import policy_docs as pd
 from core import job_gate as gate
 from core import job_gate_config as cfg
+from core.schemas import DISPLAY_LABELS
 
 RAW_CASES = Path(__file__).resolve().parents[1] / "data" / "sample-jobs" / "gate_sample_cases.json"
 EXPECTED = Path(__file__).parent / "fixtures" / "job_gate_sample_expected.json"
@@ -105,7 +106,7 @@ def test_gate_ignores_qualification():
     case = cases[0]
     posting = {"job_title": case["job_title"], "position": case["position"], "items": case["items"]}
     assert set(posting) == {"job_title", "position", "items"}  # 자격요건·경력 필드가 없다
-    assert gate.judge(posting, desired, make_stub(case))["result"] == "일치"
+    assert gate.judge(posting, desired, make_stub(case))["result"] == "match"
 
 
 @needs_raw
@@ -163,7 +164,7 @@ def test_item_label_majority():
     subs = lambda *labels: [{"label": l} for l in labels]
     assert gate.item_label(subs(sp, sp, pm), "", 0, [], never, [])[0] == sp
     assert gate.item_label(subs(sp, pm), "", 0, [], never, [])[0] == gate.MIXED
-    assert gate.item_label(subs(sp, "공통", "공통"), "", 0, [], never, [])[0] == "공통"  # 절반 미만
+    assert gate.item_label(subs(sp, gate.COMMON, gate.COMMON), "", 0, [], never, [])[0] == gate.COMMON  # 절반 미만
 
 
 def test_out_of_scope_needs_evidence():
@@ -173,11 +174,11 @@ def test_out_of_scope_needs_evidence():
     no_evidence = {"job_title": "담당자", "position": "", "items": [
         {"text": "알 수 없는 업무를 처리합니다"}, {"text": "또 다른 알 수 없는 업무를 합니다"}]}
     r = gate.judge(no_evidence, desired, ai)
-    assert r["ended_at"] != 1 and r["result"] == "범위 외"        # AI 판별을 거쳐 4단계에서 범위 외
+    assert r["ended_at"] != 1 and r["result"] == "out_of_scope"  # AI 판별을 거쳐 4단계에서 범위 외
     with_evidence = {"job_title": "담당자", "position": "", "items": [
         {"text": "마케팅 캠페인을 운영합니다"}, {"text": "광고 소재를 만듭니다"}]}
     r = gate.judge(with_evidence, desired, ai)
-    assert r["ended_at"] == 1 and r["result"] == "범위 외"        # 범위외 근거가 있어 1단계에서 끝
+    assert r["ended_at"] == 1 and r["result"] == "out_of_scope"  # 범위외 근거가 있어 1단계에서 끝
     assert not r["ai_log"]
 
 
@@ -192,16 +193,16 @@ def test_threshold_boundaries():
 
     # 정보 부족: 항목 1개는 검토 필요, 2개는 판정으로 간다
     r = judge_with([dev])
-    assert (r["result"], r["reason_code"], r["ended_at"]) == ("검토 필요", "정보 부족", 2)
-    assert judge_with([dev, dev])["result"] == "불일치"
+    assert (r["result"], r["reason_code"], r["ended_at"]) == ("review_needed", "insufficient_info", 2)
+    assert judge_with([dev, dev])["result"] == "mismatch"
 
     # 명확성: 직무명(개발자)이 가리키는 직무군과 핵심 직무군(서비스기획)이 다를 때
     r = judge_with([sp, sp, sp, dev, dev])                  # 3/5 = 0.60 < 2/3
-    assert (r["result"], r["reason_code"]) == ("검토 필요", "직무명-업무 충돌") and r["core_family"] == sp
+    assert (r["result"], r["reason_code"]) == ("review_needed", "title_task_conflict") and r["core_family"] == sp
     r = judge_with([sp, sp, sp, sp, dev, dev])              # 4/6 = 2/3 (경계값 포함)
-    assert r["result"] == "일치" and r["warnings"] == ["직무명 차이"]
+    assert r["result"] == "match" and r["warnings"] == ["title_differs"]
     r = judge_with([sp, sp, sp, sp])                         # 4/4, 직무명과 다르지만 명확
-    assert r["result"] == "일치" and r["warnings"] == ["직무명 차이"]
+    assert r["result"] == "match" and r["warnings"] == ["title_differs"]
 
 
 def test_gate_thresholds_are_the_policy_5_3_initial_values():
@@ -231,12 +232,12 @@ def test_expected_fixture_matches_policy_7_1_table():
     assert desired == "JF_SERVICE_PLANNING"
     assert sorted(rows) == [c["no"] for c in expected] == [1, 2, 3, 4, 5, 6]
     to_id = {f["name"]: fid for fid, f in cfg.JOB_FAMILIES.items()}
-    to_id["공통"] = "공통"
+    to_id["공통"] = "common"
     for case in expected:
         _, company_title, labels_cell, core_cell, gate_cell, _ = policy_7_1_rows()[case["no"]]
         assert company_title.split(",")[0] in case["company"], case["no"]
         # 판정과 핵심 직무군
-        assert gate_cell.strip("*") == case["expected"]["gate"], case["no"]
+        assert gate_cell.strip("*") == DISPLAY_LABELS[case["expected"]["gate"]], case["no"]  # 표는 한글, fixture는 코드
         m = re.fullmatch(r"(\S+) \((\d+)/(\d+)\)", core_cell)
         assert m, core_cell
         assert to_id[m.group(1)] == case["expected"]["core_family"], case["no"]
@@ -247,7 +248,7 @@ def test_expected_fixture_matches_policy_7_1_table():
             counts[to_id[name]] += int(n)
         assert counts == Counter(case["item_labels"]), (case["no"], counts)
         # 핵심 비율 = 핵심 직무군 항목 수 / 공통을 뺀 항목 수
-        non_common = [l for l in case["item_labels"] if l != "공통"]
+        non_common = [l for l in case["item_labels"] if l != "common"]
         assert (non_common.count(case["expected"]["core_family"]), len(non_common)) == (int(m.group(2)), int(m.group(3)))
 
 
@@ -257,4 +258,4 @@ def test_expected_fixture_has_no_posting_text():
     for case in expected:
         assert set(case) == {"no", "company", "expected", "item_labels", "excluded_item_count"}
         assert set(case["expected"]) == {"gate", "core_family"}
-        assert all(l == "공통" or l.startswith("JF_") for l in case["item_labels"])
+        assert all(l == "common" or l.startswith("JF_") for l in case["item_labels"])

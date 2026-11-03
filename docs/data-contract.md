@@ -478,7 +478,7 @@
 | `core/schemas.py`, `tests/test_schemas_job_gate.py` | v1을 썼다 | v2로 바꿨다 |
 | 이 문서 1-1 예시 JSON | v1이었다 | v2 예시로 바꿨다 |
 | 저장된 v1 결과 파일·fixture | 없음 (`data/raw/eval_cases.json`은 정답 형식이고 게이트 결과 형식이 아니다) | 없음 |
-| 이전 작업 폴더 `3.spec/job_gate.py` | `proceed_to_eligibility`를 쓰지 않는다 | 이식할 때 v2로 출력한다 |
+| 이전 작업 폴더 `3.spec/job_gate.py` | `proceed_to_eligibility`를 쓰지 않는다 | 이식했다(2026-11-03, 이슈 #5): 판정은 `core/job_gate.py`, v2 변환은 `core/job_gate_result.py`. 출력에 `proceed_to_eligibility`가 없다 |
 
 소비자가 없으므로 **하위 호환 변환기는 만들지 않는다.** v1 입력이 들어오면 `schema_version` 검사에서 오류가 난다. 이것은 의도한 동작이다.
 

@@ -866,7 +866,7 @@ AI로 넘어가는 하위 업무는 개발셋 기준 178 → 181개(90% → 92%)
 - [ ] [03-1 문서](job-family-definition.md): `JF_DATA_ANALYSIS`의 NCS `20010105` 능력단위 확인 (ncs.go.kr)
 - [ ] [03-1 문서](job-family-definition.md) 2-7 / 매핑표: NCS 해외영업 세분류의 분류번호·능력단위 확인 (고시 별첨 또는 ncs.go.kr). 판정에 영향이 없어 보류. 확인하면 745·746의 `source`("분류번호 확인 전")와 03-1 2-7에 번호를 적는다
 - [ ] 개선안 2-2절 "직무 불일치 게이트 1차: 직군이 다르면 직무 불일치"를 이 문서 기준으로 고친다.
-- [ ] 스키마(schemas_draft.py): 판정 결과(5종)와 핵심 직무군 ID를 별도 필드로 추가한다. 사유 코드, 경고 코드, 업무 항목별 라벨, 버전 정보를 추가한다. `JobCategory`를 직무군 ID로 바꾼다. 검토 필요·범위 외가 `FitGroup` 정렬에서 어디에 들어가는지 정한다.
+- [x] 스키마(schemas_draft.py): (2026-11-03 `core/schemas.py`의 `JobGateResult` v2로 반영, 코드는 `core/job_gate_result.py`가 만든다. 정렬은 `ranking_group`) 판정 결과(5종)와 핵심 직무군 ID를 별도 필드로 추가한다. 사유 코드, 경고 코드, 업무 항목별 라벨, 버전 정보를 추가한다. `JobCategory`를 직무군 ID로 바꾼다. 검토 필요·범위 외가 `FitGroup` 정렬에서 어디에 들어가는지 정한다.
 - [x] [자격요건 평가 문서](eligibility.md) 1-2: `Experience.category`에 직무군 ID를 쓴다고 명시함 (2026-11-03)
 
 ### 완료
@@ -960,3 +960,4 @@ AI로 넘어가는 하위 업무는 개발셋 기준 178 → 181개(90% → 92%)
 - 2026-11-03: 자격요건 평가 문서(eligibility.md) 작성에 맞춰 7-1의 참조 장을 9장에서 17장으로 바꾸고, 8장 `Experience.category` 항목을 완료로 표시
 - 2026-11-03: 코드 이식(이슈 #5)을 위한 보완. 5-4에 핵심 근거를 만드는 규칙 추가(인용은 하위 업무 원문 전체, 판정별 supporting/conflicting, 검토 필요 사유별 missing 고정 문구). 원본 코드가 판정 단위 근거를 만들지 않아 정책이 정하지 않은 부분이었다
 - 2026-11-03: 코드 이식(이슈 #5). 5-3의 기준값 경계 테스트 위치를 `tests/test_job_gate_sample.py`로 바꿈
+- 2026-11-03: 코드 이식(이슈 #5) 완료 표시. 8장 스키마 할 일을 완료로 바꾸고 코드 위치를 `core/job_gate.py`, `core/job_gate_result.py`로 기록. 판정 기록의 버전 날짜(`POLICY_REVISED`, `MAP_MODIFIED`)는 이 문서의 개정 이력과 6-4 표를 따른다

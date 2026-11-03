@@ -132,6 +132,18 @@ def test_config_version_is_a_dated_version_string():
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}\.\d+", cfg.CONFIG_VERSION)
 
 
+def test_policy_revised_is_the_last_date_in_the_policy_revision_history():
+    """판정 기록의 정책 개정일(D7). 문서를 고치면 개정 이력 날짜가 바뀌고, 이 상수도 함께 올려야 한다."""
+    assert cfg.POLICY_REVISED == pd.doc_last_revision_date()
+
+
+def test_map_modified_and_config_version_match_the_latest_validation_row():
+    """판정 기록의 매핑표 수정일(D7)과 설정값 버전이 6-4 검증 결과 표의 마지막 행과 같다."""
+    row = pd.doc_latest_validation_row()
+    assert cfg.MAP_MODIFIED == row["매핑표 수정일"]
+    assert cfg.CONFIG_VERSION == row["설정값"]
+
+
 def test_active_families_are_exactly_the_supported_ones_in_the_family_doc():
     supported = {fid for fid, status in pd.load_family_ids().items() if status == "지원"}
     assert set(cfg.active_families()) == supported

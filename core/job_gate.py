@@ -5,7 +5,7 @@
 
 AI 판별(5-2의 4단계)은 `ai_judge` 함수로 바꿔 끼운다.
     ai_judge(request: dict) -> {"label": str, "reason": str}
-    request 키: level("하위업무"/"항목"), item_index, sub_index, text, item_text,
+    request 키: level("subtask"/"item"), item_index, sub_index, text, item_text,
                 other_items, candidates, allowed, families
 라벨은 request["allowed"] 안에서만 고른다.
 
@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Protocol
 
 from core import job_gate_config as cfg
+from core.schemas import ITEM_LABEL_COMMON, ITEM_LABEL_MIXED, ITEM_LABEL_OUT_OF_SCOPE
 
 REPO = Path(__file__).resolve().parents[1]
 MAP_CSV = REPO / "data" / "job_family_map.csv"
@@ -26,7 +27,7 @@ MAP_CSV = REPO / "data" / "job_family_map.csv"
 class AiJudge(Protocol):
     """AI 자리의 형태 (5-2의 4단계). 실제 AI 연결은 보류라 지금은 mock과 스텁만 쓴다 (job-gate.md 8장).
 
-    request 키: level("하위업무"/"항목"), item_index, sub_index, text, item_text, other_items,
+    request 키: level("subtask"/"item"), item_index, sub_index, text, item_text, other_items,
                 candidates, allowed, families
     반환: {"label": str, "reason": str}. 라벨은 request["allowed"] 안에서만 고른다.
     request에는 직무명·모집부문·사람인 대분류·자격요건·우대사항·다른 항목의 라벨을 넣지 않는다 (5-2).
@@ -35,9 +36,12 @@ class AiJudge(Protocol):
     def __call__(self, request: dict) -> dict: ...
 
 
-COMMON = "공통"
-OUT_OF_SCOPE = "범위외"
-MIXED = "혼합"
+# 항목·하위 업무 라벨 중 직무군 ID(JF_*)가 아닌 것. 코드값은 schemas와 같다(한글 표시는 DISPLAY_LABELS가 맡는다)
+COMMON = ITEM_LABEL_COMMON
+OUT_OF_SCOPE = ITEM_LABEL_OUT_OF_SCOPE
+MIXED = ITEM_LABEL_MIXED
+# 3-4 표의 후보 열에서 직무군 ID 대신 오는 값은 문서 표기 그대로 한글이다. 설정값은 문서 표를 그대로 옮긴 것이다
+RULE_CANDIDATE_OUT_OF_SCOPE = "범위외"
 
 # 5-3 기준값 (초기값). 검증(6장) 결과로 조정한다
 GATE_THRESHOLDS = {
@@ -91,7 +95,7 @@ class Dictionary:
 
         for cand_rules in cfg.CONTEXT_RULES.values():
             for cand, kws in cand_rules:
-                if cand == OUT_OF_SCOPE:
+                if cand == RULE_CANDIDATE_OUT_OF_SCOPE:
                     self.oos_terms += [norm(k) for k in kws]
         for fid, f in cfg.active_families().items():
             for kw in f["keywords"]:
@@ -194,21 +198,21 @@ def label_subtask(text, item_text, item_index, sub_index, other_items, dic, ai_j
         "evidence": info["families"],
         "common_cues": info["common"],
         "context": info["context"],
-        "warnings": ["미확정 분류 사용"] if info["draft"] else [],
+        "warnings": ["unconfirmed_mapping"] if info["draft"] else [],
     }
     if not reasons:
-        record.update(label=fams[0], source="규칙")
+        record.update(label=fams[0], source="rule")
         return record
 
     request = {
-        "level": "하위업무", "item_index": item_index, "sub_index": sub_index,
+        "level": "subtask", "item_index": item_index, "sub_index": sub_index,
         "text": text, "item_text": item_text, "other_items": other_items,
         "candidates": fams, "allowed": allowed_labels(fams), "families": cfg.active_families(),
     }
     answer = ai_judge(request)
     if answer["label"] not in request["allowed"]:
         raise ValueError(f"AI가 허용되지 않은 라벨을 골랐다: {answer['label']} (허용: {request['allowed']})")
-    record.update(label=answer["label"], source="AI", ai_reasons=reasons, ai_reason=answer.get("reason", ""))
+    record.update(label=answer["label"], source="ai", ai_reasons=reasons, ai_reason=answer.get("reason", ""))
     log.append({"item": item_index, "sub": sub_index, "text": text, "label": answer["label"],
                 "reason": answer.get("reason", ""), "why_ai": reasons})
     return record
@@ -225,7 +229,7 @@ def item_label(subs, item_text, item_index, other_items, ai_judge, log):
         return COMMON, f"공통이 아닌 하위 업무 {len(non_common)}/{n}로 절반 미만"
     if len(non_common) * 2 == n:
         request = {
-            "level": "항목", "item_index": item_index, "sub_index": None,
+            "level": "item", "item_index": item_index, "sub_index": None,
             "text": item_text, "item_text": item_text, "other_items": other_items,
             "candidates": sorted(set(non_common) - {OUT_OF_SCOPE, MIXED}),
             "allowed": allowed_labels(sorted(set(non_common) - {OUT_OF_SCOPE, MIXED})),
@@ -263,12 +267,14 @@ def judge(posting, desired_family, ai_judge, dic=None):
 
     # 0. 업무 항목 정리: 회사 소개 문장은 뺀다
     items = [it for it in posting["items"] if not it.get("exclude")]
+    result["item_count"] = len(items)  # 정리된 업무 항목 수. 정보 부족 판정의 근거 문구가 쓴다
     texts = [(it.get("heading", "") + " " + it["text"]).strip() for it in items]
 
     # 대분류 정보는 샘플에 없다 (5-3): 1단계 ①은 항상 참
     title_text = posting["job_title"] + " " + posting.get("position", "")
     title_info = analyze(title_text, title_text, dic)
     title_family = next(iter(title_info["families"])) if len(title_info["families"]) == 1 else None
+    result["title_family"] = title_family
 
     # 항목별 하위 업무 단서 (1단계 ③과 3단계가 함께 쓴다)
     analyzed = []
@@ -286,11 +292,11 @@ def judge(posting, desired_family, ai_judge, dic=None):
     )
     result["oos_items"] = f"{oos_items}/{len(items)}"
     if not any_cue and items and oos_items * 2 >= len(items):  # ④ 범위외 근거가 항목의 절반 이상
-        return finish(1, "범위 외")
+        return finish(1, "out_of_scope")
 
     # 2. 정보 충분성
     if len(items) < th["min_items"]:
-        return finish(2, "검토 필요", "정보 부족")
+        return finish(2, "review_needed", "insufficient_info")
 
     # 3. 업무 항목 라벨링
     for i, it in enumerate(items):
@@ -308,16 +314,16 @@ def judge(posting, desired_family, ai_judge, dic=None):
     labels = [it["label"] for it in result["items"]]
     counted = [l for l in labels if l != COMMON]
     if not counted:
-        return finish(4, "검토 필요", "핵심 업무 없음")
+        return finish(4, "review_needed", "no_core_tasks")
     top, top_n = Counter(counted).most_common(1)[0]
     families_only = Counter(l for l in counted if l in cfg.JOB_FAMILIES)
     if families_only:
         result["core_family"] = families_only.most_common(1)[0][0]  # 검토 필요여도 추정값은 보존 (5-4)
     if top_n * 2 <= len(counted) or top == MIXED:
-        return finish(4, "검토 필요", "혼합 직무")
+        return finish(4, "review_needed", "mixed_job")
     if top == OUT_OF_SCOPE:
         result["core_family"] = None
-        return finish(4, "범위 외")
+        return finish(4, "out_of_scope")
     result["core_family"] = top
     ratio = top_n / len(counted)
     result["core_ratio"] = f"{top_n}/{len(counted)}"
@@ -325,13 +331,13 @@ def judge(posting, desired_family, ai_judge, dic=None):
     # 5. 직무명 대조 (대분류는 정보가 없어 건너뜀)
     if title_family and title_family != top:
         if ratio >= th["clear_ratio"]:
-            result["warnings"].append("직무명 차이")
+            result["warnings"].append("title_differs")
         else:
-            return finish(5, "검토 필요", "직무명-업무 충돌")
+            return finish(5, "review_needed", "title_task_conflict")
 
     # 6. 희망 직무와 비교
     if top == desired_family:
-        return finish(6, "일치")
+        return finish(6, "match")
     if cfg.is_adjacent(top, desired_family) and desired_family in labels:  # 4-1 인접 조건
-        return finish(6, "인접")
-    return finish(6, "불일치")
+        return finish(6, "adjacent")
+    return finish(6, "mismatch")
