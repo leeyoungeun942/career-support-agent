@@ -1,5 +1,6 @@
 """core/rules.py 자격요건 판정 검증 (docs/policies/eligibility.md, 이슈 #4)."""
 import itertools
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from core.rules import (
     judge_career_years,
     judge_education,
     judge_major,
+    judge_numeric,
     month_set,
     normalize_major,
 )
@@ -534,3 +536,46 @@ def test_non_integer_month_threshold_rounds_up():
     """0.7년 = 8.4개월. 정수 개월 합계는 9개월부터 충족이다."""
     check(judge_career_years(career_req(0.7), prof(job("a", "2026-01", "2026-08", SP))), "not_met", "below_threshold", "8개월 < 9개월(0.7년)")
     check(judge_career_years(career_req(0.7), prof(job("a", "2026-01", "2026-09", SP))), "met", compared="9개월 ≥ 9개월")
+
+
+# ---------------------------------------------------------------------
+# numeric 통합 진입점과 샘플 6건 회귀 (정책 17장, 이슈 #4 완료 조건)
+# ---------------------------------------------------------------------
+SAMPLE_FIXTURE = Path(__file__).parent / "fixtures" / "eligibility_sample_expected.json"
+EXPECTED_NUMERIC_IDS = ["1-R1", "1-R2", "2-R1", "3-R1", "3-R2", "4-R1", "5-R1", "5-R2", "6-R1"]
+JUDGED_KEYS = ("status", "reason_code", "compared")  # fixture에서 기대값으로만 쓰고 입력에서는 뺀다
+
+
+def sample_numeric_cases():
+    data = json.loads(SAMPLE_FIXTURE.read_text(encoding="utf-8"))
+    profile = {**data["profile"], "as_of_month": data["as_of_month"]}
+    return [(req, profile) for s in data["samples"] for req in s["requirements"] if req["type"] == "numeric"]
+
+
+def test_sample_fixture_has_the_nine_numeric_requirements():
+    assert [req["id"] for req, _ in sample_numeric_cases()] == EXPECTED_NUMERIC_IDS
+
+
+@pytest.mark.parametrize("fixture_req,profile", sample_numeric_cases(), ids=EXPECTED_NUMERIC_IDS)
+def test_sample_numeric_requirements_match_policy_17(fixture_req, profile):
+    """상태 없는 요건과 프로필만 넣으면 코드가 정책 17장과 같은 상태·사유·compared를 낸다."""
+    req = JobRequirement(**{k: v for k, v in fixture_req.items() if k not in JUDGED_KEYS})
+    result = judge_numeric(req, EligibilityProfile(**profile))
+    assert (result.status, result.reason_code, result.compared) == tuple(fixture_req.get(k) for k in JUDGED_KEYS)
+    assert (result.evidence_checked_by, result.status_decided_by) == ("rule", "rule")
+
+
+@pytest.mark.parametrize("req,judge", [
+    (career_req(3), judge_career_years),
+    (edu_req("bachelor"), judge_education),
+    (major_req("경제학"), judge_major),
+])
+def test_judge_numeric_dispatches_by_numeric_kind(req, judge):
+    profile = EligibilityProfile(as_of_month=AS_OF, education=[edu("bachelor", majors=["경제학"])],
+                                 experiences=[Experience(**job("a", "2025-07", "2025-12", SP))])
+    assert judge_numeric(req, profile) == judge(req, profile)
+
+
+def test_judge_numeric_rejects_non_numeric():
+    with pytest.raises(ValueError):
+        judge_numeric(JobRequirement(id="R1", level="required", type="skill", text="Python"), eprof())

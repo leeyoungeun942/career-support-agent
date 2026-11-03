@@ -242,3 +242,22 @@ def judge_major(req: JobRequirement, profile: EligibilityProfile) -> Requirement
         question=f"이 공고는 {names} 전공을 요구합니다. {have} 전공으로 지원할 수 있는지 공고를 확인해 보세요",
         evidence=_education_evidence(profile, *with_majors),
     )
+
+
+# =====================================================================
+# numeric 요건 통합 진입점 (eligibility.md 13장 2단계)
+# =====================================================================
+
+def judge_numeric(
+    req: JobRequirement,
+    profile: EligibilityProfile,
+    adjacent_pairs: Collection[frozenset[str]] = ADJACENT_FAMILY_PAIRS,
+) -> RequirementResult:
+    """numeric 요건 1개를 numeric_kind에 따라 판정한다. 상태와 사유, compared, 근거는 모두 코드가 만든다."""
+    if req.type != "numeric":
+        raise ValueError(f"요건 {req.id}: type={req.type}는 코드가 판정하지 않는다 (numeric만)")
+    if req.numeric_kind == "career_years":
+        return judge_career_years(req, profile, adjacent_pairs)
+    if req.numeric_kind == "education":
+        return judge_education(req, profile)
+    return judge_major(req, profile)
