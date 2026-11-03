@@ -5,15 +5,17 @@
 """
 import math
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 
 from core.schemas import (
     DEGREE_ORDER,
     NEEDS_CHECK_REASONS,
     Education,
     EligibilityProfile,
+    EligibilityResult,
     Experience,
     ItemResult,
+    JobGateResult,
     JobRequirement,
     ProfileEvidence,
     RequirementResult,
@@ -379,3 +381,62 @@ def check_profile_evidence(results: Iterable[RequirementResult], profile: Eligib
                 problems.append(f"{where}: {problem}")
     if problems:
         raise ValueError("\n".join(["프로필 근거 검증 실패", *problems]))
+
+
+# =====================================================================
+# 순위 정렬과 게이트 일치 검사 (eligibility.md 14장, data-contract 2-2)
+# =====================================================================
+
+GROUP_ORDER = {"primary": 0, "job_mismatch": 1, "out_of_scope": 2}
+VERDICT_ORDER = {"eligible": 0, "conditional": 1, "not_eligible": 2}
+
+
+def check_gate_consistency(result: EligibilityResult, gate: JobGateResult) -> None:
+    """자격요건 결과의 gate_ranking_group이 같은 공고의 게이트 결과와 같은지 검사한다. 다르면 저장하지 않는다."""
+    if result.job_id != gate.job_id:
+        raise ValueError(f"job_id가 다르다: 자격요건 {result.job_id!r}, 게이트 {gate.job_id!r}")
+    if result.gate_ranking_group != gate.ranking_group:
+        raise ValueError(
+            f"공고 {result.job_id}: gate_ranking_group={result.gate_ranking_group}이 "
+            f"게이트 결과의 ranking_group={gate.ranking_group}과 다르다"
+        )
+
+
+def _by_job_id(items: Iterable, what: str) -> dict:
+    found: dict = {}
+    for item in items:
+        if item.job_id in found:
+            raise ValueError(f"{what}에 job_id {item.job_id!r}가 둘 이상 있다")
+        found[item.job_id] = item
+    return found
+
+
+def rank_jobs(
+    results: Iterable[EligibilityResult],
+    gates: Iterable[JobGateResult],
+    scores: Mapping[str, float] | None = None,
+) -> list[EligibilityResult]:
+    """ranking_group -> verdict -> 점수(높은 쪽 먼저) 순으로 정렬한다. 뒤 기준은 앞 기준을 넘지 못한다 (14장).
+
+    정렬 전에 모든 결과를 게이트 결과와 맞춰 본다. 점수가 없는 공고는 점수가 있는 공고 뒤에 오고, 동점과 무점수는 입력 순서를 유지한다.
+    """
+    results = list(results)
+    by_id = _by_job_id(results, "자격요건 결과")
+    gate_by_id = _by_job_id(gates, "게이트 결과")
+    for result in results:
+        if result.job_id not in gate_by_id:
+            raise ValueError(f"공고 {result.job_id}: 게이트 결과가 없다")
+        check_gate_consistency(result, gate_by_id[result.job_id])
+    scores = dict(scores or {})
+    if unknown := sorted(scores.keys() - by_id.keys()):
+        raise ValueError(f"자격요건 결과가 없는 job_id의 점수: {unknown}")
+    for job_id, score in scores.items():
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+            raise ValueError(f"공고 {job_id}: 점수가 유한한 숫자가 아니다: {score!r}")
+
+    def sort_key(result: EligibilityResult):
+        score = scores.get(result.job_id)
+        return (GROUP_ORDER[gate_by_id[result.job_id].ranking_group], VERDICT_ORDER[result.verdict],
+                score is None, -(score or 0))
+
+    return sorted(results, key=sort_key)

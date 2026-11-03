@@ -8,6 +8,7 @@ import pytest
 from core.rules import (
     ADJACENT_FAMILY_PAIRS,
     career_experiences,
+    check_gate_consistency,
     check_profile_evidence,
     count_months,
     experience_months,
@@ -20,6 +21,7 @@ from core.rules import (
     month_set,
     normalize_ai_result,
     normalize_major,
+    rank_jobs,
 )
 from core.schemas import (
     Education,
@@ -27,6 +29,7 @@ from core.schemas import (
     EligibilityResult,
     Experience,
     ItemResult,
+    JobGateResult,
     JobRequirement,
     RequirementResult,
     month_index,
@@ -914,3 +917,179 @@ def test_all_problems_in_one_requirement_are_reported():
         check_profile_evidence([result], evidence_profile())
     message = str(err.value)
     assert "지어낸 문장 하나" in message and "지어낸 문장 둘" in message and "Figma" not in message
+
+
+# ---------------------------------------------------------------------
+# 순위 정렬과 게이트 일치 검사 (정책 14장, data-contract 2-2)
+# ---------------------------------------------------------------------
+GATE_RESULT_OF_GROUP = {"primary": "match", "job_mismatch": "mismatch", "out_of_scope": "out_of_scope"}
+
+
+def gate_of(job_id, group="primary"):
+    result = GATE_RESULT_OF_GROUP[group]
+    return JobGateResult(job_id=job_id, desired_family="JF_SERVICE_PLANNING", result=result, summary="테스트",
+                         core_family="JF_SERVICE_PLANNING" if result == "match" else ("JF_DEV" if result == "mismatch" else None))
+
+
+def verdict_result(job_id, verdict, group="primary", **kw):
+    """종합 판정이 verdict가 되는 가장 작은 결과."""
+    if verdict == "not_eligible":
+        req = career_req(3)
+        res = RequirementResult(requirement_id="R1", status="not_met", reason_code="below_threshold", compared="0개월 < 36개월(3년)",
+                                status_decided_by="rule", evidence_checked_by="rule")
+    else:
+        req = skill_req()
+        res = RequirementResult(requirement_id="R1", status="met" if verdict == "eligible" else "needs_check",
+                                reason_code=None if verdict == "eligible" else "no_profile_info",
+                                status_decided_by="ai", evidence_checked_by="ai")
+    result = EligibilityResult(job_id=job_id, gate_ranking_group=group, as_of_month=AS_OF, requirements=[req],
+                               requirement_results=[res], **kw)
+    assert result.verdict == verdict
+    return result
+
+
+def rank(entries, scores=None):
+    """entries: (job_id, verdict, group) 목록. 정렬된 job_id 목록을 돌려준다."""
+    results = [verdict_result(j, v, g) for j, v, g in entries]
+    gates = [gate_of(j, g) for j, _, g in entries]
+    return [r.job_id for r in rank_jobs(results, gates, scores)]
+
+
+def test_ranking_group_comes_before_verdict():
+    order = rank([("mismatch-eligible", "eligible", "job_mismatch"), ("primary-not-eligible", "not_eligible", "primary"),
+                  ("out-eligible", "eligible", "out_of_scope"), ("primary-eligible", "eligible", "primary")])
+    assert order == ["primary-eligible", "primary-not-eligible", "mismatch-eligible", "out-eligible"]
+
+
+def test_verdict_order_inside_a_group():
+    order = rank([("c", "not_eligible", "primary"), ("a", "eligible", "primary"), ("b", "conditional", "primary")])
+    assert order == ["a", "b", "c"]
+
+
+def test_not_eligible_jobs_are_not_dropped():
+    assert rank([("a", "not_eligible", "primary"), ("b", "not_eligible", "out_of_scope")]) == ["a", "b"]
+
+
+def test_score_cannot_beat_verdict():
+    """점수 99의 미충족이 점수 70의 적합 위로 올라가지 못한다."""
+    order = rank([("bad", "not_eligible", "primary"), ("good", "eligible", "primary")], {"bad": 99, "good": 70})
+    assert order == ["good", "bad"]
+
+
+def test_score_cannot_beat_ranking_group():
+    """불일치 그룹의 100점은 primary의 미충족 아래에 놓인다."""
+    order = rank([("mismatch", "eligible", "job_mismatch"), ("primary", "not_eligible", "primary")], {"mismatch": 100, "primary": 0})
+    assert order == ["primary", "mismatch"]
+
+
+def test_higher_score_first_within_same_group_and_verdict():
+    order = rank([("a", "conditional", "primary"), ("b", "conditional", "primary"), ("c", "conditional", "primary")],
+                 {"a": 50, "b": 90, "c": 70})
+    assert order == ["b", "c", "a"]
+
+
+def test_scored_jobs_come_before_unscored_in_same_cell():
+    order = rank([("none1", "conditional", "primary"), ("scored", "conditional", "primary"), ("none2", "conditional", "primary")],
+                 {"scored": 0})
+    assert order == ["scored", "none1", "none2"]  # 0점도 점수가 있는 것이다. 무점수끼리는 입력 순서
+
+
+def test_no_scores_keeps_input_order():
+    entries = [("c", "conditional", "primary"), ("a", "conditional", "primary"), ("b", "conditional", "primary")]
+    assert rank(entries) == ["c", "a", "b"]
+    assert rank(entries, {}) == ["c", "a", "b"]
+
+
+def test_equal_scores_keep_input_order():
+    entries = [("x", "eligible", "primary"), ("y", "eligible", "primary"), ("z", "eligible", "primary")]
+    assert rank(entries, {"x": 80, "y": 80, "z": 80}) == ["x", "y", "z"]
+    assert rank(entries, {"x": 80, "y": 90, "z": 80}) == ["y", "x", "z"]
+
+
+def test_empty_input():
+    assert rank_jobs([], []) == []
+
+
+def test_sample_ranking_puts_sample_3_first_and_sample_1_second():
+    """정책 17장: 3번(primary, 조건부 적합)이 1번(primary, 미충족)보다 위. 불일치 4건은 둘 다 아래 그룹."""
+    data = json.loads(SAMPLE_FIXTURE.read_text(encoding="utf-8"))
+    entries = [(s["job_id"], s["expected"]["verdict"], s["gate_ranking_group"]) for s in data["samples"]]
+    order = rank(entries)
+    assert order[:2] == ["sample-3", "sample-1"]
+    assert sorted(order[2:]) == ["sample-2", "sample-4", "sample-5", "sample-6"]
+    # 불일치 그룹 안에서도 conditional(4, 5) -> not_eligible(2, 6), 같은 칸은 입력 순서
+    assert order[2:] == ["sample-4", "sample-5", "sample-2", "sample-6"]
+
+
+def test_sample_ranking_ignores_a_perfect_score_in_mismatch_group():
+    data = json.loads(SAMPLE_FIXTURE.read_text(encoding="utf-8"))
+    entries = [(s["job_id"], s["expected"]["verdict"], s["gate_ranking_group"]) for s in data["samples"]]
+    order = rank(entries, {"sample-4": 100, "sample-1": 0})
+    assert order[:2] == ["sample-3", "sample-1"] and order.index("sample-4") > order.index("sample-1")
+
+
+# --- 게이트 일치 검사 ---------------------------------------------------
+def test_matching_gate_passes():
+    check_gate_consistency(verdict_result("j1", "eligible", "job_mismatch"), gate_of("j1", "job_mismatch"))
+
+
+@pytest.mark.parametrize("result_group,gate_group", [("primary", "job_mismatch"), ("job_mismatch", "primary"),
+                                                     ("primary", "out_of_scope"), ("out_of_scope", "job_mismatch")])
+def test_group_mismatch_is_an_error_with_both_values(result_group, gate_group):
+    with pytest.raises(ValueError) as err:
+        check_gate_consistency(verdict_result("j1", "eligible", result_group), gate_of("j1", gate_group))
+    assert "j1" in str(err.value) and result_group in str(err.value) and gate_group in str(err.value)
+
+
+def test_job_id_mismatch_is_an_error():
+    with pytest.raises(ValueError, match="job_id가 다르다"):
+        check_gate_consistency(verdict_result("j1", "eligible"), gate_of("j2"))
+
+
+def test_rank_jobs_refuses_to_rank_when_any_group_mismatches():
+    results = [verdict_result("a", "eligible", "primary"), verdict_result("b", "eligible", "primary")]
+    gates = [gate_of("a", "primary"), gate_of("b", "job_mismatch")]
+    with pytest.raises(ValueError, match="b"):
+        rank_jobs(results, gates)
+
+
+def test_rank_jobs_sorts_by_the_gate_group_it_checked():
+    """정렬 기준은 검사를 통과한 게이트 결과의 그룹이다. 결과가 게이트와 어긋난 채로는 정렬되지 않는다."""
+    results = [verdict_result("a", "eligible", "job_mismatch"), verdict_result("b", "not_eligible", "primary")]
+    gates = [gate_of("a", "job_mismatch"), gate_of("b", "primary")]
+    assert [r.job_id for r in rank_jobs(results, gates)] == ["b", "a"]
+
+
+def test_missing_gate_result_is_an_error():
+    with pytest.raises(ValueError, match="게이트 결과가 없다"):
+        rank_jobs([verdict_result("a", "eligible")], [])
+
+
+def test_gate_without_eligibility_result_is_ignored():
+    results = [verdict_result("a", "eligible")]
+    assert [r.job_id for r in rank_jobs(results, [gate_of("a"), gate_of("only-gate", "job_mismatch")])] == ["a"]
+
+
+def test_duplicate_job_ids_are_errors():
+    with pytest.raises(ValueError, match="자격요건 결과에 job_id 'a'"):
+        rank_jobs([verdict_result("a", "eligible"), verdict_result("a", "conditional")], [gate_of("a")])
+    with pytest.raises(ValueError, match="게이트 결과에 job_id 'a'"):
+        rank_jobs([verdict_result("a", "eligible")], [gate_of("a"), gate_of("a")])
+
+
+def test_score_for_unknown_job_is_an_error():
+    with pytest.raises(ValueError, match="점수"):
+        rank_jobs([verdict_result("a", "eligible")], [gate_of("a")], {"typo": 10})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), "90", None, True])
+def test_non_finite_or_non_numeric_score_is_an_error(bad):
+    with pytest.raises(ValueError, match="유한한 숫자"):
+        rank_jobs([verdict_result("a", "eligible")], [gate_of("a")], {"a": bad})
+
+
+def test_rank_jobs_does_not_mutate_input_lists():
+    results = [verdict_result("b", "not_eligible"), verdict_result("a", "eligible")]
+    ids = [r.job_id for r in results]
+    rank_jobs(results, [gate_of("a"), gate_of("b")])
+    assert [r.job_id for r in results] == ids
