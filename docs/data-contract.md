@@ -37,7 +37,7 @@
   "detail": {
     "ended_at_step": 6,
     "core_ratio": {"count": 2, "total": 2},
-    "oos_items": {"count": 0, "total": 3},
+    "oos_items": {"count": 0, "total": 2},
     "evidence": {
       "supporting": [
         {"item_index": 0, "quote": "로드맵 수립", "source": "job_posting", "decided_by": "rule"},
@@ -66,12 +66,32 @@
             "ai_reason": null
           }
         ]
+      },
+      {
+        "index": 1,
+        "heading": "",
+        "text": "고객 VOC 기반 기능 개선 과제 도출",
+        "label": "JF_SERVICE_PLANNING",
+        "why": "공통이 아닌 하위 업무 1/1 중 1개가 같은 라벨 (과반)",
+        "subtasks": [
+          {
+            "text": "고객 VOC 기반 기능 개선 과제 도출",
+            "label": "JF_SERVICE_PLANNING",
+            "source": "rule",
+            "candidates": ["JF_SERVICE_PLANNING"],
+            "cues": {"JF_SERVICE_PLANNING": ["기능 개선"]},
+            "common_cues": [],
+            "context_rules": [],
+            "warnings": [],
+            "ai_reason": null
+          }
+        ]
       }
     ],
     "ai_log": [],
     "versions": {
-      "config_version": "2026-11-02.1",
-      "policy_revised": "2026-11-02",
+      "config_version": "2026-11-03.1",
+      "policy_revised": "2026-11-03",
       "map_modified": "2026-10-27",
       "ai_model": null,
       "prompt_version": null
@@ -115,6 +135,8 @@
 | `display_flag` | `job_scope_differs` / `job_needs_check` | 직무 범위 차이 / 직무 확인 필요 |
 | 업무 항목 라벨 | `JF_*` / `common` / `out_of_scope` / `mixed` | 직무군 이름 / 공통 / 범위외 / 혼합 |
 | `source`, `decided_by` | `rule` / `ai` | 규칙 / AI |
+
+- `category_differs`는 사람인 대분류 입력이 있을 때만 생기는 경고다. 대분류 입력이 아직 구현되지 않아(정책 8장 보류) 지금 코드는 이 경고를 만들지 않는다.
 
 **`reason_code`는 하나만 있다.** 판정은 5-1의 단계 순서대로 진행하고, 사유가 처음 생긴 단계에서 끝난다. 그래서 한 공고에 사유가 둘 생기지 않는다. 여러 사유가 겹쳐 보이는 공고라도 먼저 걸린 단계의 사유가 남는다. 우선순위는 단계 순서와 같다.
 

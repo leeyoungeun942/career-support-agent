@@ -299,10 +299,10 @@ def devset():
 
 @needs_devset
 def test_devset_every_case_matches_its_answer(devset):
-    """개발셋 30/30: 판정, 핵심 직무군, 항목 라벨이 모두 정답과 같다 (6-4 2회차 이후 유지)."""
+    """개발셋 30/30: 판정, 핵심 직무군, 항목 라벨이 모두 정답과 같다 (6-4 2회차 이후 유지, 5회차에서 항목 170개)."""
     metrics, rows, events = devset
     assert metrics["n"] == 30
-    assert metrics["gate_ok"] == (30, 30) and metrics["core_ok"] == (30, 30) and metrics["item_ok"] == (155, 155)
+    assert metrics["gate_ok"] == (30, 30) and metrics["core_ok"] == (30, 30) and metrics["item_ok"] == (170, 170)
     assert metrics["wrong"] == [] and events == []  # AI 라벨 목록 밖 정답(후보 탐색 누락)도 없다
 
 
@@ -314,9 +314,9 @@ def test_devset_has_no_dangerous_errors(devset):
 
 
 @needs_devset
-def test_devset_ai_call_share_is_181_of_197(devset):
-    """AI로 넘어간 하위 업무 수. 규칙 확정이 줄거나 늘면 이 숫자가 바뀐다(비용·속도 지표)."""
-    assert devset[0]["ai_calls"] == (181, 197)
+def test_devset_ai_call_share_is_197_of_213(devset):
+    """AI로 넘어간 하위 업무 수. 규칙 확정이 줄거나 늘면 이 숫자가 바뀐다(비용·속도 지표). 정책 6-4 5회차와 같다."""
+    assert devset[0]["ai_calls"] == (197, 213)
 
 
 @needs_devset

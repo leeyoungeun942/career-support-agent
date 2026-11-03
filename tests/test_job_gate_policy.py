@@ -3,14 +3,18 @@
 1-5의 판정 5종·사유 4종·경고 3종과 후속 처리(정렬 그룹, 표시 문구), 5-3 기준값을 문서 표에서 읽어 코드와 비교한다.
 문서를 읽는 계약 테스트라 정책 문서 형식이 바뀌면 깨진다. 설정값 표(3-2, 3-4, 4-2)는 test_job_gate_config.py가 맡는다.
 """
+import json
 import re
+from datetime import date
 from typing import get_args
 
 import pytest
 
 import policy_docs as pd
 from core import job_gate as gate
-from core.schemas import DISPLAY_FLAGS, DISPLAY_LABELS, RANKING_GROUP, GateResultCode, ReasonCode, WarningCode
+from core import job_gate_config as cfg
+from core.job_gate_result import make_summary
+from core.schemas import DISPLAY_FLAGS, DISPLAY_LABELS, RANKING_GROUP, GateResultCode, JobGateResult, ReasonCode, WarningCode
 
 pytestmark = pytest.mark.policy_contract
 
@@ -86,3 +90,28 @@ def test_thresholds_match_policy_5_3_table():
     assert gate.GATE_THRESHOLDS["min_items"] == min_items
     assert gate.GATE_THRESHOLDS["clear_ratio"] == pytest.approx(int(num) / int(den))
     assert set(gate.GATE_THRESHOLDS) == {"min_items", "clear_ratio"}  # 표에 없는 기준값을 코드에 몰래 두지 않는다
+
+
+def data_contract_example():
+    """data-contract.md 1-1의 job_gate_result.v2 예시 JSON."""
+    section = "\n".join(pd.section((pd.REPO / "docs" / "data-contract.md").read_text(encoding="utf-8"), "### 1-1."))
+    return json.loads(re.search(r"```json\n(.*?)\n```", section, re.S).group(1))
+
+
+def test_data_contract_example_is_a_valid_result_with_current_versions():
+    """계약 예시가 스키마를 통과하고, 코드가 만드는 버전 값과 어긋나지 않는다(예시가 낡지 않게)."""
+    example = data_contract_example()
+    result = JobGateResult.model_validate(example)  # 인용이 원문에 있는지 등 스키마 검사까지 한다
+    versions = result.detail.versions
+    assert versions.config_version == cfg.CONFIG_VERSION
+    assert versions.map_modified == date.fromisoformat(cfg.MAP_MODIFIED)
+    assert versions.policy_revised <= date.fromisoformat(cfg.POLICY_REVISED)  # 정책 개정일보다 미래일 수는 없다
+    assert example["ranking_group"] == result.ranking_group and example["display_flag"] == result.display_flag
+
+
+def test_data_contract_example_summary_is_what_the_code_would_write():
+    example = data_contract_example()
+    raw = {"result": example["result"], "desired_family": example["desired_family"], "core_family": example["core_family"],
+           "reason_code": example["reason_code"], "core_ratio": "%d/%d" % (example["detail"]["core_ratio"]["count"], example["detail"]["core_ratio"]["total"]),
+           "oos_items": "%d/%d" % (example["detail"]["oos_items"]["count"], example["detail"]["oos_items"]["total"])}
+    assert make_summary(raw) == example["summary"]

@@ -2,6 +2,7 @@
 
 입력은 직무명, 모집부문, 주요 업무 항목뿐이다. 자격요건·우대사항·경력은 받지 않는다 (5-1).
 그래서 자격요건이 미충족이어도 게이트 결과는 달라지지 않는다 (1-2).
+정책 5-1은 사람인 대분류를 "있으면" 받는 선택 입력으로 정했지만 아직 구현하지 않았다(8장 보류). 받지 않는 입력이 오면 무시하지 않고 오류를 낸다.
 
 AI 판별(5-2의 4단계)은 `ai_judge` 함수로 바꿔 끼운다.
     ai_judge(request: dict) -> {"label": str, "reason": str}
@@ -170,8 +171,19 @@ def split_subtasks(text):
     'A/B 테스트', '추적/취합/분석'처럼 붙은 '/'는 나누지 않는다."""
     parts = []
     for chunk in re.split(r"\s+/\s+", text):
-        parts += re.split(r"(?<=[다요함음])\.\s+", chunk.strip())
+        parts += re.split(r"(?<=[가-힣)\]])\.\s+", chunk.strip())
     return [p.strip().rstrip(".") for p in parts if p.strip()]
+
+
+def has_candidate_cue(info):
+    """analyze() 결과에 지원 직무군의 후보 탐색 단서가 있는가 (5-1 1단계 ②③).
+
+    직무군이 정해진 단서뿐 아니라, 지원 직무군이 후보인 문맥 판별 대상 소분류와 미확정 행이 나온 것도 단서로 본다.
+    아직 라벨을 정하지 못했을 뿐 지원 직무군일 수 있어서 범위 외로 확정하지 않고 라벨링으로 보낸다.
+    """
+    if info["families"] or info["draft"]:
+        return True
+    return any(cand in cfg.active_families() for rec in info["context"] for cand, _ in cfg.CONTEXT_RULES[rec["rule"]])
 
 
 def allowed_labels(candidates):
@@ -247,11 +259,21 @@ def item_label(subs, item_text, item_index, other_items, ai_judge, log):
     return MIXED, "공통이 아닌 하위 업무가 절반 초과인데 어느 라벨도 과반이 아님 (분리 불가)"
 
 
+POSTING_KEYS = {"job_title", "position", "items"}
+
+
 def judge(posting, desired_family, ai_judge, dic=None):
     """공고 1건을 판정한다 (5-1). 반환값은 5-4의 기록 필드를 따른다.
 
     posting: {"job_title", "position", "items": [{"heading"?, "text", "exclude"?}]}
+    이 밖의 키는 받지 않고 ValueError를 낸다. 자격요건 같은 입력이 판정에 영향을 준다고 오해하거나, 지원하지 않는 사람인 대분류가
+    조용히 무시되는 것을 막는다.
     """
+    if unsupported := sorted(set(posting) - POSTING_KEYS):
+        raise ValueError(
+            f"게이트가 받지 않는 입력: {unsupported} (입력은 직무명, 모집부문, 주요 업무 항목뿐이다. "
+            "사람인 대분류는 정책 5-1의 선택 입력이지만 아직 구현하지 않았다: 8장 보류)"
+        )
     dic = dic or Dictionary()
     th = GATE_THRESHOLDS
     log = []
@@ -284,8 +306,8 @@ def judge(posting, desired_family, ai_judge, dic=None):
         analyzed.append((subs, others))
 
     # 1. 범위 외 확인 (네 조건 모두, 5-1). 대분류 정보가 없어 ①은 항상 참이다
-    any_cue = bool(title_info["families"]) or any(
-        analyze(s, texts[i], dic)["families"] for i, (subs, _) in enumerate(analyzed) for s in subs
+    any_cue = has_candidate_cue(title_info) or any(
+        has_candidate_cue(analyze(s, texts[i], dic)) for i, (subs, _) in enumerate(analyzed) for s in subs
     )
     oos_items = sum(
         1 for t in texts if any(find_term(term, norm(t), word_starts(t)) for term in dic.oos_terms if term)

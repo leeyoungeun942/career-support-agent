@@ -8,6 +8,7 @@
 
 판정·사유·경고·출처는 job_gate_result.v2의 영문 코드다(한글 표시는 DISPLAY_LABELS가 맡는다).
 """
+import csv
 import json
 import re
 from collections import Counter
@@ -156,6 +157,130 @@ def test_find_term_does_not_crash_on_characters_that_expand_when_lowercased():
     assert gate.find_term(gate.norm("개발"), gate.norm(text), gate.word_starts(text))  # 공백 뒤 새 단어의 시작
     assert not gate.find_term(gate.norm("발업"), gate.norm(text), gate.word_starts(text))  # 단어 중간은 여전히 아니다
     assert gate.find_term(gate.norm("i"), gate.norm("İstanbul"), gate.word_starts("İstanbul"))  # 첫 글자의 확장 중 첫 글자는 단어 시작
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("PRD 작성. GUI 디자인.", ["PRD 작성", "GUI 디자인"]),                       # 명사로 끝난 문장도 나뉜다 (정책 5-2: 한 문장은 하위 업무 1개)
+    ("RAG 구축. 평가 설계.", ["RAG 구축", "평가 설계"]),
+    ("에이전트를 설계합니다. 결과를 정리합니다.", ["에이전트를 설계합니다", "결과를 정리합니다"]),
+    ("기획 문서 (초안). 검토 [내부]. 승인", ["기획 문서 (초안)", "검토 [내부]", "승인"]),  # 닫는 괄호 뒤
+    ("Node.js 서버 개발. v1.5 배포", ["Node.js 서버 개발", "v1.5 배포"]),         # 공백 없는 마침표는 나누지 않는다
+    ("Ph.D. 수준 연구. 논문 작성", ["Ph.D. 수준 연구", "논문 작성"]),             # 영문 약어 뒤는 나누지 않는다
+    ("1. 기획 2. 개발", ["1. 기획 2. 개발"]),                                      # 숫자 뒤는 나누지 않는다
+    ("A/B 테스트 설계 / 지표 정의", ["A/B 테스트 설계", "지표 정의"]),             # ' / '로 이어진 업무
+    ("마침표 없는 한 문장", ["마침표 없는 한 문장"]),
+    ("", []),
+])
+def test_split_subtasks_follows_policy_5_2(text, expected):
+    assert gate.split_subtasks(text) == expected
+
+
+def test_two_sentences_in_one_item_are_judged_as_two_subtasks():
+    """리뷰에서 나온 사례: "PRD 작성. GUI 디자인."이 하위 업무 하나로 합쳐져 AI가 두 업무를 구별하지 못했다."""
+    by_text = {"PRD 작성": "JF_SERVICE_PLANNING", "GUI 디자인": "JF_UIUX_DESIGN", "PRD review": "JF_SERVICE_PLANNING"}
+
+    def ai(request):
+        return {"label": by_text.get(request["text"], "JF_SERVICE_PLANNING"), "reason": "스텁"}
+
+    r = gate.judge({"job_title": "담당자", "position": "", "items": [{"text": "PRD 작성. GUI 디자인."}, {"text": "PRD review"}]}, "JF_SERVICE_PLANNING", ai)
+    assert [s["text"] for s in r["items"][0]["subtasks"]] == ["PRD 작성", "GUI 디자인"]
+    assert [s["label"] for s in r["items"][0]["subtasks"]] == ["JF_SERVICE_PLANNING", "JF_UIUX_DESIGN"]  # 하위 업무마다 라벨이 따로 붙는다
+    # 서로 다른 직무군의 책임이 한 항목에 병렬로 있고 어느 라벨도 과반이 아니면 혼합이다 (5-2 항목 라벨 규칙)
+    assert r["items"][0]["label"] == gate.MIXED
+    # 합쳐져 있을 때는 항목이 UI/UX 하나로 정해지고 핵심 직무군 추정도 UI/UX였다. 이제 추정은 서비스기획이고 결과는 검토 필요다
+    assert (r["result"], r["reason_code"], r["core_family"]) == ("review_needed", "mixed_job", "JF_SERVICE_PLANNING")
+
+
+# --- 1단계 범위 외: 후보 탐색 단서의 범위 (정책 5-1 ②③) ----------------------------------
+def write_map(path, rows):
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=pd.COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({c: row.get(c, "") for c in pd.COLUMNS})
+
+
+def map_row(name, status, cd, review="approved", **extra):
+    return {"job_mid_cd": "16", "job_mid_name": "기획·전략", "job_cd": cd, "job_name": name, "item_type": "직무",
+            "mapping_status": status, "source": "시험", "mapping_reason": "시험", "review_status": review, **extra}
+
+
+ADS_ITEMS = [{"text": "광고캠페인시험 진행"}, {"text": "광고캠페인시험 정리"}]  # 범위외 근거가 항목 2/2에 있다
+OOS_AI = lambda request: {"label": gate.OUT_OF_SCOPE, "reason": "스텁"}  # noqa: E731
+
+
+def judge_ads(dic, title):
+    return gate.judge({"job_title": title, "position": "", "items": ADS_ITEMS}, "JF_SERVICE_PLANNING", OOS_AI, dic)
+
+
+def test_ambiguous_context_title_is_not_ended_as_out_of_scope_at_step_1():
+    """리뷰에서 나온 사례: 직무명 "사업기획"은 문맥 판별 대상이라 지원 직무군일 수 있다. 업무가 마케팅이어도 1단계에서 끝내지 않는다."""
+    ai = lambda request: {"label": "JF_SERVICE_PLANNING", "reason": "스텁"}  # noqa: E731
+    r = gate.judge({"job_title": "사업기획", "position": "", "items": [{"text": "마케팅기획"}]}, "JF_SERVICE_PLANNING", ai)
+    assert (r["result"], r["reason_code"], r["ended_at"]) == ("review_needed", "insufficient_info", 2)  # 업무 한 줄이라 정보 부족, 사용자가 확인한다
+    r = gate.judge({"job_title": "사업기획", "position": "", "items": [{"text": "마케팅기획"}, {"text": "마케팅 광고 운영"}]}, "JF_SERVICE_PLANNING", OOS_AI)
+    assert r["ended_at"] == 4 and r["result"] == "out_of_scope" and len(r["items"]) == 2  # 라벨링을 거쳐 범위 외가 된다 (근거가 남는다)
+
+
+def test_step_1_still_ends_when_there_is_no_cue_at_all():
+    r = gate.judge({"job_title": "담당자", "position": "", "items": [{"text": "마케팅 캠페인을 운영합니다"}, {"text": "광고 소재를 만듭니다"}]}, "JF_SERVICE_PLANNING", OOS_AI)
+    assert (r["result"], r["ended_at"], r["items"]) == ("out_of_scope", 1, [])
+
+
+def test_context_term_is_a_cue_only_when_a_supported_family_is_a_candidate(tmp_path, monkeypatch):
+    """후보가 범위외·공통뿐인 문맥 규칙의 소분류는 지원 직무군의 단서가 아니다 (5-1)."""
+    monkeypatch.setitem(cfg.CONTEXT_RULES, "CTX_ONLY_OUT", [("범위외", ["시험범위외어"]), ("공통", ["시험공통어"])])
+    monkeypatch.setitem(cfg.CONTEXT_RULES, "CTX_WITH_DEV", [("JF_DEV", ["시험개발어"]), ("범위외", ["시험범위외둘"])])
+    write_map(tmp_path / "map.csv", [map_row("시험소분류A", "context", "9001", context_rule="CTX_ONLY_OUT"),
+                                     map_row("시험소분류B", "context", "9002", context_rule="CTX_WITH_DEV"),
+                                     map_row("광고캠페인시험", "out_of_scope", "9003")])
+    dic = gate.Dictionary(tmp_path / "map.csv")
+    assert (judge_ads(dic, "시험소분류A")["result"], judge_ads(dic, "시험소분류A")["ended_at"]) == ("out_of_scope", 1)  # 단서가 아니라서 1단계에서 끝난다
+    assert judge_ads(dic, "시험소분류B")["ended_at"] == 4                       # 지원 직무군(개발)이 후보라 라벨링으로 간다
+    assert judge_ads(dic, "담당자")["ended_at"] == 1                             # 아무 단서도 없으면 1단계에서 끝난다
+
+
+def test_unconfirmed_mapping_row_is_a_cue(tmp_path):
+    """미확정(draft) 행이 관여하면 지원 직무군일 수 있어 범위 외로 확정하지 않는다."""
+    write_map(tmp_path / "map.csv", [map_row("초안단서시험", "mapped", "9001", review="draft", job_family_id="JF_DEV"),
+                                     map_row("광고캠페인시험", "out_of_scope", "9003")])
+    dic = gate.Dictionary(tmp_path / "map.csv")
+    assert judge_ads(dic, "초안단서시험")["ended_at"] == 4
+    assert judge_ads(dic, "담당자")["ended_at"] == 1
+
+
+def test_context_term_in_a_work_item_is_a_cue_too(tmp_path, monkeypatch):
+    """정책 5-1 ③: 업무 항목에 후보 탐색 단서가 하나라도 있으면 범위 외로 확정하지 않는다(직무명뿐 아니라)."""
+    monkeypatch.setitem(cfg.CONTEXT_RULES, "CTX_ONLY_OUT", [("범위외", ["시험범위외어"]), ("공통", ["시험공통어"])])
+    monkeypatch.setitem(cfg.CONTEXT_RULES, "CTX_WITH_DEV", [("JF_DEV", ["시험개발어"]), ("범위외", ["시험범위외둘"])])
+    write_map(tmp_path / "map.csv", [map_row("시험소분류A", "context", "9001", context_rule="CTX_ONLY_OUT"),
+                                     map_row("시험소분류B", "context", "9002", context_rule="CTX_WITH_DEV"),
+                                     map_row("광고캠페인시험", "out_of_scope", "9003")])
+    dic = gate.Dictionary(tmp_path / "map.csv")
+
+    def judge_with(extra_item):  # 범위외 근거가 항목 2/3에 있다
+        items = ADS_ITEMS + [{"text": extra_item}]
+        return gate.judge({"job_title": "담당자", "position": "", "items": items}, "JF_SERVICE_PLANNING", OOS_AI, dic)
+
+    assert judge_with("시험소분류B 정리")["ended_at"] == 4   # 지원 직무군 후보가 있는 문맥 소분류가 업무에 있다
+    assert judge_with("시험소분류A 정리")["ended_at"] == 1   # 후보가 범위외·공통뿐이면 단서가 아니다
+    assert judge_with("관련 없는 정리")["ended_at"] == 1
+
+
+# --- 입력 계약: 받지 않는 입력을 조용히 무시하지 않는다 ------------------------------------
+@pytest.mark.parametrize("extra", [{"job_mid_name": "IT개발·데이터"}, {"qualifications": ["Python 3년"]}, {"company": "회사"}])
+def test_unsupported_posting_keys_are_rejected_not_ignored(extra):
+    posting = {"job_title": "담당자", "position": "", "items": [{"text": "서비스 기획서 작성"}, {"text": "화면 설계"}], **extra}
+    with pytest.raises(ValueError, match="게이트가 받지 않는 입력") as err:
+        gate.judge(posting, "JF_SERVICE_PLANNING", lambda request: {"label": "JF_SERVICE_PLANNING", "reason": ""})
+    assert next(iter(extra)) in str(err.value)
+    if "job_mid_name" in extra:
+        assert "사람인 대분류" in str(err.value) and "8장 보류" in str(err.value)  # 왜 안 되는지 알려 준다
+
+
+def test_position_is_optional_and_accepted_keys_still_work():
+    posting = {"job_title": "담당자", "items": [{"text": "서비스 기획서 작성"}, {"text": "화면 설계"}]}
+    assert gate.judge(posting, "JF_SERVICE_PLANNING", lambda request: {"label": "JF_SERVICE_PLANNING", "reason": ""})["result"] == "match"
 
 
 def test_item_label_majority():
