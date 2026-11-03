@@ -461,6 +461,11 @@
 | 4. 상태 검증 | **코드** | LLM이 `not_met`을 내면 코드가 `needs_check`로 되돌린다. `not_met`은 numeric 값 비교와 `user_denied`만 허용한다. 되돌릴 때의 사유는 LLM이 낸 확인 필요 사유가 유효하면 그대로 쓰고, 없으면 `scope_unclear`다. `interpretation_note`에 "AI가 미충족으로 판단해 확인 필요로 조정"을 남긴다. 사용자가 정한 `user_denied`는 되돌리지 않는다. 이 검증은 LLM의 원시 출력에 스키마 검증 **전에** 적용한다 |
 | 5. 종합 판정·요약 | **코드** | `any_of` 항목 결과 합치기(2장), `verdict`, 결정적 요건, `needs_check_count`, `summary` |
 
+- **상태 검증의 범위 (4단계).** `not_met`을 그대로 두는 경우는 둘뿐이다: `numeric` 요건에서 `status_decided_by=rule`일 때, `skill`·`qualitative` 요건에서 `status_decided_by=user`일 때. 그 밖의 `not_met`(AI가 냈거나 판정 주체가 비어 있거나, `numeric`인데 AI가 판정한 것)은 모두 `needs_check`로 되돌린다.
+  - 되돌린 결과의 `status_decided_by`는 `ai`다. 사유는 LLM이 낸 값이 확인 필요 사유(3-1)이면 그대로, 아니면(`below_threshold`, `user_denied`, 빈 값, 모르는 값) `scope_unclear`다.
+  - `any_of` 요건은 항목마다 같은 검사를 한다. 하나라도 되돌리면 요건의 `interpretation_note`에 한 번 남긴다. `interpretation_note`가 이미 있으면 뒤에 ` / `로 이어 쓴다.
+  - 입력 딕셔너리를 바꾸지 않고 새 딕셔너리를 돌려준다. 상태가 `null`(`preference`), `met`, `needs_check`인 결과는 손대지 않는다.
+- **`any_of` 합치기 (5단계).** 결정 항목(data-contract 2-4)의 `status`, `reason_code`, `evidence_checked_by`, `status_decided_by`를 요건 전체 값으로 옮기고, `job_quote`, `profile_evidence`, `compared`, `question_for_user`는 비운다. 항목의 `item_index`가 요건의 `items`와 1:1이 아니거나 `combine`이 `any_of`가 아니면 오류다.
 - **종합 판정 규칙:** `level=required`이고 `type≠preference`인 요건만 본다.
   1. 미충족이 하나라도 있으면 `not_eligible`
   2. 없고 확인 필요가 하나라도 있으면 `conditional`
@@ -678,3 +683,4 @@
 - 2026-11-03: data-contract 2장 작성에 맞춤. 1-4 추출 상태는 `extraction_issues`에서 계산하는 값으로 정리. 2장 `any_of`는 `skill`·`qualitative` 요건에만 쓴다고 명시
 - 2026-11-03: 코드 리뷰 반영. 3-2 `user_denied`는 `skill`·`qualitative` 요건에만. 1-4 `extraction_issues`에 `partial_extraction`, `required_preferred_ambiguous` 추가. 18장에 겹친 경력 합산 테스트(rules 구현 때 필수)와 fixture-정책 대조를 명시
 - 2026-11-03: `core/rules.py` 구현(이슈 #4)을 위한 보완. 4-2 신설(인접 직무군 쌍을 인자로 받음, 프로필이 비었을 때, `compared` 표기, 근거 인용). 1-2에 `education[].raw`(선택) 추가. 3-1에 코드가 정하는 질문 문구. 6장에 빈 학력 처리. 13장에 AI의 `not_met`을 되돌릴 때의 사유와 프로필 근거 검증. 14장에 적합성 점수가 없을 때의 정렬
+- 2026-11-03: `core/rules.py` 상태 검증과 `any_of` 합치기 구현(이슈 #4)을 위한 보완. 13장에 상태 검증의 범위(남기는 `not_met` 조건, 되돌린 뒤의 판정 주체·사유·메모, `any_of` 항목별 적용)와 `any_of` 합치기 규칙

@@ -15,10 +15,21 @@ from core.rules import (
     judge_education,
     judge_major,
     judge_numeric,
+    merge_any_of,
     month_set,
+    normalize_ai_result,
     normalize_major,
 )
-from core.schemas import Education, EligibilityProfile, EligibilityResult, Experience, JobRequirement, month_index
+from core.schemas import (
+    Education,
+    EligibilityProfile,
+    EligibilityResult,
+    Experience,
+    ItemResult,
+    JobRequirement,
+    RequirementResult,
+    month_index,
+)
 
 AS_OF = "2026-11"
 
@@ -579,3 +590,195 @@ def test_judge_numeric_dispatches_by_numeric_kind(req, judge):
 def test_judge_numeric_rejects_non_numeric():
     with pytest.raises(ValueError):
         judge_numeric(JobRequirement(id="R1", level="required", type="skill", text="Python"), eprof())
+
+
+# ---------------------------------------------------------------------
+# AI 결과 상태 검증 (정책 13장 4단계)
+# ---------------------------------------------------------------------
+NOTE = "AI가 미충족으로 판단해 확인 필요로 조정"
+
+
+def skill_req(id="R1", **kw):
+    return JobRequirement(**{"id": id, "level": "required", "type": "skill", "text": "Python 실무 경험", **kw})
+
+
+def raw_result(status, reason=None, decided_by="ai", **kw):
+    return {"requirement_id": "R1", "status": status, "reason_code": reason, "status_decided_by": decided_by,
+            "evidence_checked_by": "ai", **kw}
+
+
+def test_ai_not_met_is_reverted_to_needs_check_with_note():
+    raw = raw_result("not_met", "user_denied")
+    fixed = normalize_ai_result(raw, skill_req())
+    assert (fixed["status"], fixed["reason_code"], fixed["status_decided_by"]) == ("needs_check", "scope_unclear", "ai")
+    assert fixed["interpretation_note"] == NOTE
+    RequirementResult(**fixed)  # 스키마 검증을 통과한다
+
+
+@pytest.mark.parametrize("reason", ["level_unclear", "no_profile_info", "scope_unclear"])
+def test_valid_needs_check_reason_from_ai_is_kept(reason):
+    assert normalize_ai_result(raw_result("not_met", reason), skill_req())["reason_code"] == reason
+
+
+@pytest.mark.parametrize("reason", [None, "below_threshold", "user_denied", "made_up"])
+def test_invalid_reason_becomes_scope_unclear(reason):
+    assert normalize_ai_result(raw_result("not_met", reason), skill_req())["reason_code"] == "scope_unclear"
+
+
+def test_user_denied_by_user_is_not_reverted():
+    raw = raw_result("not_met", "user_denied", decided_by="user")
+    assert normalize_ai_result(raw, skill_req()) == raw
+
+
+def test_rule_not_met_on_numeric_is_not_reverted():
+    raw = raw_result("not_met", "below_threshold", decided_by="rule", evidence_checked_by="rule")
+    assert normalize_ai_result(raw, career_req(3)) == raw
+
+
+def test_ai_not_met_on_numeric_is_reverted():
+    assert normalize_ai_result(raw_result("not_met", "below_threshold"), career_req(3))["status"] == "needs_check"
+
+
+def test_rule_not_met_on_skill_is_reverted():
+    """skill은 코드가 판정하지 않는다. rule이라고 적혀 있어도 인정하지 않는다."""
+    assert normalize_ai_result(raw_result("not_met", "below_threshold", decided_by="rule"), skill_req())["status"] == "needs_check"
+
+
+def test_user_not_met_on_numeric_is_reverted():
+    assert normalize_ai_result(raw_result("not_met", "user_denied", decided_by="user"), career_req(3))["status"] == "needs_check"
+
+
+def test_not_met_without_decider_is_reverted():
+    raw = raw_result("not_met", "user_denied")
+    del raw["status_decided_by"]
+    fixed = normalize_ai_result(raw, skill_req())
+    assert (fixed["status"], fixed["status_decided_by"]) == ("needs_check", "ai")
+
+
+@pytest.mark.parametrize("raw", [
+    raw_result("met", decided_by="ai"),
+    raw_result("needs_check", "level_unclear"),
+    {"requirement_id": "R1", "status": None},
+])
+def test_other_statuses_are_untouched(raw):
+    assert normalize_ai_result(raw, skill_req()) == raw
+
+
+def test_normalize_does_not_mutate_input():
+    raw = raw_result("not_met", "user_denied", item_results=[raw_result("not_met") | {"item_index": 0}])
+    snapshot = json.loads(json.dumps(raw))
+    normalize_ai_result(raw, skill_req())
+    assert raw == snapshot
+
+
+def test_existing_interpretation_note_is_kept_and_extended():
+    fixed = normalize_ai_result(raw_result("not_met", interpretation_note="원래 메모"), skill_req())
+    assert fixed["interpretation_note"] == f"원래 메모 / {NOTE}"
+
+
+def test_no_note_when_nothing_was_reverted():
+    assert "interpretation_note" not in normalize_ai_result(raw_result("met"), skill_req())
+
+
+def any_of_req(id="R1", type="skill"):
+    return JobRequirement(id=id, level="required", type=type, text="영어가능자, 운전가능자", combine="any_of",
+                          items=[{"index": 0, "text": "영어가능자"}, {"index": 1, "text": "운전가능자"}])
+
+
+def raw_item(index, status, reason=None, decided_by="ai"):
+    return {"item_index": index, "status": status, "reason_code": reason, "status_decided_by": decided_by,
+            "evidence_checked_by": "ai"}
+
+
+def test_any_of_items_are_checked_one_by_one_and_note_goes_on_requirement():
+    raw = {"requirement_id": "R1", "item_results": [raw_item(0, "not_met", "user_denied"),
+                                                    raw_item(1, "not_met", "user_denied", decided_by="user")]}
+    fixed = normalize_ai_result(raw, any_of_req())
+    first, second = fixed["item_results"]
+    assert (first["status"], first["reason_code"], first["status_decided_by"]) == ("needs_check", "scope_unclear", "ai")
+    assert second == raw["item_results"][1]  # 사용자가 답한 항목은 그대로
+    assert fixed["interpretation_note"] == NOTE
+    assert "interpretation_note" not in first
+
+
+def test_any_of_without_reverted_items_has_no_note():
+    raw = {"requirement_id": "R1", "item_results": [raw_item(0, "met"), raw_item(1, "not_met", "user_denied", decided_by="user")]}
+    assert normalize_ai_result(raw, any_of_req()) == raw
+
+
+# ---------------------------------------------------------------------
+# any_of 합치기 (정책 2장, data-contract 2-4)
+# ---------------------------------------------------------------------
+def item(index, status, reason=None, decided_by="ai", **kw):
+    return ItemResult(item_index=index, status=status, reason_code=reason, status_decided_by=decided_by,
+                      evidence_checked_by="ai", **kw)
+
+
+def merged_result(req, items, **kw):
+    return EligibilityResult(job_id="j1", gate_ranking_group="primary", as_of_month=AS_OF, requirements=[req],
+                             requirement_results=[merge_any_of(req, items, **kw)])
+
+
+def test_merge_takes_first_met_item_as_decision():
+    req = any_of_req()
+    items = [item(0, "needs_check", "no_profile_info", question_for_user="영어를 쓸 수 있나요?", job_quote="영어가능자"),
+             item(1, "met", profile_evidence=[{"field": "skills", "quote": "운전"}], job_quote="운전가능자")]
+    merged = merge_any_of(req, items)
+    assert (merged.status, merged.reason_code, merged.status_decided_by, merged.evidence_checked_by) == ("met", None, "ai", "ai")
+    assert (merged.job_quote, merged.profile_evidence, merged.compared, merged.question_for_user) == (None, [], None, None)
+    assert [r.item_index for r in merged.item_results] == [0, 1]
+
+
+def test_merge_first_needs_check_when_no_met():
+    merged = merge_any_of(any_of_req(), [item(1, "needs_check", "scope_unclear"), item(0, "needs_check", "no_profile_info")])
+    assert (merged.status, merged.reason_code) == ("needs_check", "no_profile_info")  # item_index가 작은 쪽
+    assert [r.item_index for r in merged.item_results] == [0, 1]  # 입력 순서와 상관없이 정렬
+
+
+def test_merge_all_not_met_uses_item_zero_and_user_denied():
+    denied = lambda i: item(i, "not_met", "user_denied", decided_by="user")
+    merged = merge_any_of(any_of_req(), [denied(1), denied(0)])
+    assert (merged.status, merged.reason_code, merged.status_decided_by) == ("not_met", "user_denied", "user")
+
+
+def test_merge_keeps_interpretation_note():
+    assert merge_any_of(any_of_req(), [item(0, "met"), item(1, "met")], interpretation_note="9장 해석").interpretation_note == "9장 해석"
+
+
+@pytest.mark.parametrize("type", ["skill", "qualitative"])
+def test_merged_result_is_valid_inside_eligibility_result(type):
+    result = merged_result(any_of_req(type=type), [item(0, "needs_check", "no_profile_info"), item(1, "met")])
+    assert result.verdict == "eligible"
+    assert result.requirement_results[0].item_results[1].status == "met"
+
+
+def test_normalized_ai_items_merge_into_valid_result():
+    """되돌림 -> 합치기 -> 스키마 검증이 이어서 동작한다."""
+    req = any_of_req()
+    raw = {"requirement_id": "R1", "item_results": [raw_item(0, "not_met", "user_denied"), raw_item(1, "not_met", "level_unclear")]}
+    fixed = normalize_ai_result(raw, req)
+    result = merged_result(req, [ItemResult(**i) for i in fixed["item_results"]], interpretation_note=fixed["interpretation_note"])
+    assert result.verdict == "conditional"
+    assert result.requirement_results[0].interpretation_note == NOTE
+
+
+@pytest.mark.parametrize("items", [
+    [item(0, "met")],                                    # 항목 부족
+    [item(0, "met"), item(1, "met"), item(2, "met")],    # 항목 초과
+    [item(0, "met"), item(0, "met")],                    # 중복
+    [item(1, "met"), item(2, "met")],                    # 0부터 시작하지 않음
+])
+def test_merge_rejects_items_not_matching_requirement(items):
+    with pytest.raises(ValueError):
+        merge_any_of(any_of_req(), items)
+
+
+def test_merge_rejects_non_any_of_requirement():
+    with pytest.raises(ValueError):
+        merge_any_of(skill_req(), [item(0, "met")])
+
+
+def test_merge_rejects_non_any_of_requirement_even_with_no_items():
+    """combine 검사가 항목 1:1 검사와 별개로 동작한다. 항목이 없을 때 IndexError가 아니라 ValueError여야 한다."""
+    with pytest.raises(ValueError, match="any_of가 아니다"):
+        merge_any_of(skill_req(), [])

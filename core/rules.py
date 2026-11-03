@@ -8,12 +8,15 @@ from collections.abc import Collection, Iterable
 
 from core.schemas import (
     DEGREE_ORDER,
+    NEEDS_CHECK_REASONS,
     Education,
     EligibilityProfile,
     Experience,
+    ItemResult,
     JobRequirement,
     ProfileEvidence,
     RequirementResult,
+    decision_item,
     month_index,
 )
 
@@ -261,3 +264,64 @@ def judge_numeric(
     if req.numeric_kind == "education":
         return judge_education(req, profile)
     return judge_major(req, profile)
+
+
+# =====================================================================
+# AI 결과 상태 검증과 any_of 합치기 (eligibility.md 13장 4~5단계, 2장)
+# =====================================================================
+
+NOTE_AI_NOT_MET_ADJUSTED = "AI가 미충족으로 판단해 확인 필요로 조정"
+
+
+def _not_met_allowed(req: JobRequirement, decided_by: str | None) -> bool:
+    """numeric은 코드(rule)가, skill·qualitative는 사용자(user)가 정한 not_met만 인정한다 (3-2, 13장)."""
+    return decided_by == ("rule" if req.type == "numeric" else "user")
+
+
+def _revert_not_met(body: dict, req: JobRequirement) -> tuple[dict, bool]:
+    if body.get("status") != "not_met" or _not_met_allowed(req, body.get("status_decided_by")):
+        return body, False
+    reason = body.get("reason_code")
+    return {
+        **body,
+        "status": "needs_check",
+        "reason_code": reason if reason in NEEDS_CHECK_REASONS else "scope_unclear",
+        "status_decided_by": "ai",
+    }, True
+
+
+def normalize_ai_result(raw: dict, req: JobRequirement) -> dict:
+    """LLM 원시 결과(딕셔너리)의 허용되지 않는 not_met을 needs_check로 되돌린다. 스키마 검증 전에 쓴다 (13장 4단계).
+
+    any_of는 항목마다 같은 검사를 하고, 하나라도 되돌리면 요건의 interpretation_note에 남긴다. 입력은 바꾸지 않는다.
+    """
+    out, changed = _revert_not_met(raw, req)
+    if "item_results" in raw:
+        reverted = [_revert_not_met(item, req) for item in raw["item_results"]]
+        out = {**out, "item_results": [item for item, _ in reverted]}
+        changed = changed or any(did for _, did in reverted)
+    if changed:
+        note = out.get("interpretation_note")
+        out = {**out, "interpretation_note": f"{note} / {NOTE_AI_NOT_MET_ADJUSTED}" if note else NOTE_AI_NOT_MET_ADJUSTED}
+    return out
+
+
+def merge_any_of(
+    req: JobRequirement, item_results: list[ItemResult], interpretation_note: str | None = None
+) -> RequirementResult:
+    """any_of 항목 결과를 요건 전체 결과로 합친다. 값은 결정 항목에서 옮기고 근거·질문은 항목에만 둔다 (data-contract 2-4)."""
+    if req.combine != "any_of":
+        raise ValueError(f"요건 {req.id}: combine={req.combine}는 any_of가 아니다")
+    ordered = sorted(item_results, key=lambda r: r.item_index)
+    if [r.item_index for r in ordered] != [it.index for it in req.items]:
+        raise ValueError(f"요건 {req.id}: item_results의 item_index가 items와 1:1이 아니다")
+    decided = decision_item(ordered)
+    return RequirementResult(
+        requirement_id=req.id,
+        status=decided.status,
+        reason_code=decided.reason_code,
+        evidence_checked_by=decided.evidence_checked_by,
+        status_decided_by=decided.status_decided_by,
+        interpretation_note=interpretation_note,
+        item_results=ordered,
+    )
