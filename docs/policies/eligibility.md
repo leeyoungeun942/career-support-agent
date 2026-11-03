@@ -474,6 +474,9 @@
 - **결정적 요건:** `not_eligible`이면 `not_met`인 필수 요건 전부, `conditional`이면 `needs_check`인 필수 요건 전부, `eligible`이면 없음이다. 3번 경우처럼 추출 불완전 때문에 `conditional`이면 결정적 요건은 없고, `summary`가 `extraction_issues`를 보여 준다.
 - `summary`는 LLM이 쓰지 않는다. 코드가 판정 값을 템플릿에 넣어 만든다.
 - **프로필 근거 검증 (코드).** `profile_evidence`의 `experience_id`가 프로필에 있어야 하고, `quote`가 그 경험의 원문(`title`, `role`, `actions`, `tools`, `result`) 안에 있어야 한다. `field` 근거(`skills`, `certificates`, `education[i]`)도 해당 칸의 원문 안에 있어야 한다. 어기면 오류로 처리하고 결과를 저장하지 않는다. 스키마는 프로필을 모르므로 이 검사는 코드가 한다.
+  - **원문을 찾는 방법.** `quote`는 원문 **한 조각 안에** 글자 그대로 들어 있어야 한다. 조각은 `title`, `role`, `result`, `actions`의 항목 하나, `tools`의 항목 하나이고, `field` 근거는 `skills`·`certificates`·`other_qualifications`의 항목 하나, `education[i]`의 `raw`다. 여러 조각을 이어 붙인 글에서는 찾지 않는다. 공백이나 문장부호를 맞춰 주지 않는다. 새로 쓴 문장이 근거로 들어오는 것을 막으려는 규칙이다.
+  - **다음은 모두 오류다.** 프로필에 없는 `experience_id`, 위 칸이 아닌 `field`(`skills_denied` 포함), 범위를 벗어난 `education[i]`, `raw`가 없는 `education[i]`, 조각 안에 없는 `quote`.
+  - **오류는 모아서 낸다.** 위반을 모두 찾아 한 번에 알린다. 위반마다 요건 id(`any_of`는 항목 번호도)와 근거를 적는다. `any_of` 항목의 근거도 같은 검사를 한다. 검사는 요건의 `profile_evidence`가 비어 있어도 통과한다.
 - 근거는 원문 인용으로 남긴다. `job_quote`는 해당 요건 `text` 안에, 프로필 인용은 프로필 원문 안에 있어야 한다.
 - 근거를 찾으려고 프로필을 **확인한** 주체(`evidence_checked_by`)와 상태를 정한 주체(`status_decided_by`)는 따로 기록한다. 확인했지만 근거가 없었던 경우(`no_profile_info`)도 확인한 주체를 적는다. 아직 확인하지 않았으면 `null`이다.
 
@@ -684,3 +687,4 @@
 - 2026-11-03: 코드 리뷰 반영. 3-2 `user_denied`는 `skill`·`qualitative` 요건에만. 1-4 `extraction_issues`에 `partial_extraction`, `required_preferred_ambiguous` 추가. 18장에 겹친 경력 합산 테스트(rules 구현 때 필수)와 fixture-정책 대조를 명시
 - 2026-11-03: `core/rules.py` 구현(이슈 #4)을 위한 보완. 4-2 신설(인접 직무군 쌍을 인자로 받음, 프로필이 비었을 때, `compared` 표기, 근거 인용). 1-2에 `education[].raw`(선택) 추가. 3-1에 코드가 정하는 질문 문구. 6장에 빈 학력 처리. 13장에 AI의 `not_met`을 되돌릴 때의 사유와 프로필 근거 검증. 14장에 적합성 점수가 없을 때의 정렬
 - 2026-11-03: `core/rules.py` 상태 검증과 `any_of` 합치기 구현(이슈 #4)을 위한 보완. 13장에 상태 검증의 범위(남기는 `not_met` 조건, 되돌린 뒤의 판정 주체·사유·메모, `any_of` 항목별 적용)와 `any_of` 합치기 규칙
+- 2026-11-03: `core/rules.py` 프로필 근거 검증 구현(이슈 #4)을 위한 보완. 13장에 원문 조각 단위 검사, `other_qualifications` 허용, 오류 조건과 오류를 모아 내는 방식

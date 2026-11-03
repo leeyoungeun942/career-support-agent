@@ -8,6 +8,7 @@ import pytest
 from core.rules import (
     ADJACENT_FAMILY_PAIRS,
     career_experiences,
+    check_profile_evidence,
     count_months,
     experience_months,
     is_adjacent,
@@ -782,3 +783,134 @@ def test_merge_rejects_non_any_of_requirement_even_with_no_items():
     """combine 검사가 항목 1:1 검사와 별개로 동작한다. 항목이 없을 때 IndexError가 아니라 ValueError여야 한다."""
     with pytest.raises(ValueError, match="any_of가 아니다"):
         merge_any_of(skill_req(), [])
+
+
+# ---------------------------------------------------------------------
+# 프로필 근거 검증 (정책 13장, data-contract 2-6)
+# ---------------------------------------------------------------------
+def evidence_profile():
+    return EligibilityProfile(
+        as_of_month=AS_OF,
+        education=[Education(degree="bachelor", status="graduated", raw="OO대학교 영어영문학과 졸업 (2026.02)"),
+                   Education(degree="master", status="enrolled")],  # raw 없음
+        experiences=[
+            Experience(id="exp-1", title="B2B AI 챗봇 기획팀 인턴", type="intern", period={"start": "2025-07", "end": "2025-12"},
+                       role="서비스 기획 보조", actions=["알파 버전 QA 수행", "예외 처리 가이드 작성"], tools=["Figma", "Notion"],
+                       result="불만족 응답 약 200건 분류"),
+            Experience(id="exp-2", title="동아리 운영", type="activity", period={"start": "2024-03", "end": "2024-12"}),
+        ],
+        skills=["ChatGPT/Claude 사용 경험", "SQL 기초"],
+        skills_denied=["Kubernetes"],
+        certificates=["ADsP", "TOEIC Speaking IH (150점)"],
+        other_qualifications=["2종보통운전면허"],
+    )
+
+
+def ev_result(*evidence, requirement_id="R1", items=()):
+    return RequirementResult(
+        requirement_id=requirement_id, status="met", status_decided_by="ai", evidence_checked_by="ai",
+        profile_evidence=list(evidence), item_results=list(items),
+    )
+
+
+def exp_ev(quote, id="exp-1"):
+    return {"experience_id": id, "quote": quote}
+
+
+def field_ev(field, quote):
+    return {"field": field, "quote": quote}
+
+
+@pytest.mark.parametrize("evidence", [
+    exp_ev("B2B AI 챗봇 기획팀 인턴"),             # title 전체
+    exp_ev("챗봇 기획팀"),                          # title 일부
+    exp_ev("서비스 기획 보조"),                     # role
+    exp_ev("알파 버전 QA 수행"),                    # actions 항목
+    exp_ev("예외 처리"),                            # actions 항목의 일부
+    exp_ev("Figma"),                                # tools 항목
+    exp_ev("약 200건 분류"),                        # result
+    field_ev("skills", "ChatGPT/Claude 사용 경험"),
+    field_ev("skills", "SQL"),
+    field_ev("certificates", "TOEIC Speaking IH (150점)"),
+    field_ev("other_qualifications", "2종보통운전면허"),
+    field_ev("education[0]", "OO대학교 영어영문학과 졸업 (2026.02)"),
+    field_ev("education[0]", "영어영문학과"),
+])
+def test_valid_evidence_passes(evidence):
+    check_profile_evidence([ev_result(evidence)], evidence_profile())
+
+
+def test_no_evidence_and_no_results_pass():
+    check_profile_evidence([], evidence_profile())
+    check_profile_evidence([ev_result()], evidence_profile())
+
+
+@pytest.mark.parametrize("evidence,message", [
+    (exp_ev("기획팀 인턴", id="exp-9"), "프로필에 없는 experience_id 'exp-9'"),
+    (exp_ev("지어낸 문장"), "quote가 경험 exp-1의 원문에 없다"),
+    (exp_ev("동아리 운영"), "quote가 경험 exp-1의 원문에 없다"),          # 다른 경험의 문장
+    (exp_ev("알파 버전 QA 수행 예외 처리 가이드 작성"), "원문에 없다"),      # 두 조각을 이어 붙임
+    (exp_ev("B2B  AI 챗봇"), "원문에 없다"),                               # 공백이 다름
+    (exp_ev("b2b ai 챗봇"), "원문에 없다"),                                # 대소문자가 다름
+    (exp_ev("서비스 기획 보조 알파 버전"), "원문에 없다"),                  # role과 actions를 이어 붙임
+    (field_ev("skills", "Kubernetes"), "quote가 field 'skills'의 원문에 없다"),
+    (field_ev("skills", "ChatGPT/Claude 사용 경험 SQL 기초"), "원문에 없다"),   # 두 항목을 이어 붙임
+    (field_ev("skills_denied", "Kubernetes"), "근거로 쓸 수 없는 field 'skills_denied'"),
+    (field_ev("hobbies", "독서"), "근거로 쓸 수 없는 field 'hobbies'"),
+    (field_ev("education[1]", "대학원"), "근거로 쓸 수 없는 field 'education[1]'"),   # raw 없음
+    (field_ev("education[5]", "대학원"), "근거로 쓸 수 없는 field 'education[5]'"),   # 범위 밖
+    (field_ev("education[0]", "서울대학교"), "quote가 field 'education[0]'의 원문에 없다"),
+    (field_ev("education[0] ", "영어영문학과"), "근거로 쓸 수 없는 field"),           # 형식이 다름
+])
+def test_invalid_evidence_is_rejected(evidence, message):
+    with pytest.raises(ValueError, match="프로필 근거 검증 실패") as err:
+        check_profile_evidence([ev_result(evidence)], evidence_profile())
+    assert message in str(err.value)
+
+
+def test_errors_are_collected_with_requirement_ids():
+    results = [ev_result(exp_ev("지어낸 문장"), requirement_id="R1"), ev_result(exp_ev("Figma"), requirement_id="R2"),
+               ev_result(field_ev("skills", "없는 스킬"), requirement_id="R3")]
+    with pytest.raises(ValueError) as err:
+        check_profile_evidence(results, evidence_profile())
+    lines = str(err.value).splitlines()
+    assert len(lines) == 3 and lines[1].startswith("R1:") and lines[2].startswith("R3:")  # R2는 정상이라 없다
+
+
+def test_evidence_in_any_of_items_is_checked():
+    items = [item(0, "met", profile_evidence=[exp_ev("Figma")]),
+             item(1, "met", profile_evidence=[exp_ev("지어낸 문장")])]
+    result = ev_result(requirement_id="R1", items=items)
+    with pytest.raises(ValueError) as err:
+        check_profile_evidence([result], evidence_profile())
+    assert "R1[항목 1]: quote가 경험 exp-1의 원문에 없다" in str(err.value)
+    assert "항목 0" not in str(err.value)
+
+
+def test_any_of_items_with_valid_evidence_pass():
+    items = [item(0, "met", profile_evidence=[field_ev("certificates", "TOEIC Speaking IH")]), item(1, "needs_check", "no_profile_info")]
+    check_profile_evidence([ev_result(items=items)], evidence_profile())
+
+
+def test_evidence_made_by_rules_passes_its_own_check():
+    """코드가 낸 판정(경력은 title, 학력은 raw 인용)은 항상 이 검사를 통과해야 한다."""
+    profile = evidence_profile()
+    career = judge_career_years(career_req(3, family=None), profile)
+    education = judge_education(edu_req("bachelor"), profile)
+    assert career.profile_evidence and education.profile_evidence
+    check_profile_evidence([career, education], profile)
+
+
+def test_sample_fixture_rule_evidence_passes():
+    for fixture_req, profile in sample_numeric_cases():
+        req = JobRequirement(**{k: v for k, v in fixture_req.items() if k not in JUDGED_KEYS})
+        p = EligibilityProfile(**profile)
+        check_profile_evidence([judge_numeric(req, p)], p)
+
+
+def test_all_problems_in_one_requirement_are_reported():
+    result = ev_result(exp_ev("지어낸 문장 하나"), exp_ev("Figma"), exp_ev("지어낸 문장 둘"))
+    with pytest.raises(ValueError) as err:
+        check_profile_evidence([result], evidence_profile())
+    message = str(err.value)
+    assert "지어낸 문장 하나" in message and "지어낸 문장 둘" in message and "Figma" not in message

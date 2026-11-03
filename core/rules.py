@@ -4,6 +4,7 @@
 - 이 파일과 정책 문서가 다르면 이 파일을 문서에 맞춘다. 문서가 미확정이거나 모순이면 먼저 문서를 확정한 뒤 맞춘다.
 """
 import math
+import re
 from collections.abc import Collection, Iterable
 
 from core.schemas import (
@@ -325,3 +326,56 @@ def merge_any_of(
         interpretation_note=interpretation_note,
         item_results=ordered,
     )
+
+
+# =====================================================================
+# 프로필 근거 검증 (eligibility.md 13장, data-contract 2-6)
+# =====================================================================
+
+# 스키마는 프로필을 모르므로 이 검사는 코드가 한다. field로 쓸 수 있는 목록 칸 (skills_denied는 근거가 아니다)
+EVIDENCE_LIST_FIELDS = ("skills", "certificates", "other_qualifications")
+_EDUCATION_FIELD = re.compile(r"education\[(\d+)\]")
+
+
+def _experience_pieces(exp: Experience) -> list[str]:
+    """경험 원문 조각. quote는 이 중 한 조각 안에 글자 그대로 있어야 한다."""
+    return [p for p in (exp.title, exp.role, exp.result, *exp.actions, *exp.tools) if p]
+
+
+def _field_pieces(profile: EligibilityProfile, field: str) -> list[str] | None:
+    """field 근거의 원문 조각. 쓸 수 없는 field이면 None."""
+    if field in EVIDENCE_LIST_FIELDS:
+        return list(getattr(profile, field))
+    if m := _EDUCATION_FIELD.fullmatch(field):
+        index = int(m.group(1))
+        if index < len(profile.education) and profile.education[index].raw:
+            return [profile.education[index].raw]
+    return None
+
+
+def _evidence_problem(profile: EligibilityProfile, ev: ProfileEvidence) -> str | None:
+    if ev.experience_id is not None:
+        exp = next((e for e in profile.experiences if e.id == ev.experience_id), None)
+        if exp is None:
+            return f"프로필에 없는 experience_id {ev.experience_id!r}"
+        pieces, where = _experience_pieces(exp), f"경험 {ev.experience_id}"
+    else:
+        pieces, where = _field_pieces(profile, ev.field), f"field {ev.field!r}"
+        if pieces is None:
+            return f"근거로 쓸 수 없는 {where} (없는 칸, 범위 밖 education[i], raw 없음)"
+    if not any(ev.quote in piece for piece in pieces):
+        return f"quote가 {where}의 원문에 없다: {ev.quote!r}"
+    return None
+
+
+def check_profile_evidence(results: Iterable[RequirementResult], profile: EligibilityProfile) -> None:
+    """모든 profile_evidence(any_of 항목 포함)가 프로필 원문에 있는지 검사한다. 어긋난 곳을 모아 ValueError로 낸다."""
+    problems = []
+    for res in results:
+        located = [(res.requirement_id, ev) for ev in res.profile_evidence]
+        located += [(f"{res.requirement_id}[항목 {it.item_index}]", ev) for it in res.item_results for ev in it.profile_evidence]
+        for where, ev in located:
+            if problem := _evidence_problem(profile, ev):
+                problems.append(f"{where}: {problem}")
+    if problems:
+        raise ValueError("\n".join(["프로필 근거 검증 실패", *problems]))
