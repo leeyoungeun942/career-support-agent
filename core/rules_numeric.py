@@ -8,6 +8,7 @@ from collections.abc import Collection, Iterable
 
 from core.schemas import (
     DEGREE_ORDER,
+    DISPLAY_LABELS,
     Education,
     EligibilityProfile,
     Experience,
@@ -72,6 +73,11 @@ QUESTION_NO_MAJOR = "전공을 입력해 주세요"
 QUESTION_GRADUATION_PENDING = "이 공고는 졸업 예정자 지원 가능 여부를 적지 않았습니다. 지원할 수 있는지 공고를 확인해 보세요"
 
 
+def _require_kind(req: JobRequirement, kind: str, what: str) -> None:
+    if req.numeric_kind != kind:
+        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 {what} 판정 대상이 아니다")
+
+
 def _titles(experiences: Iterable[Experience]) -> str:
     return ", ".join(f"‘{e.title}’" for e in experiences)
 
@@ -113,8 +119,7 @@ def judge_career_years(
     adjacent_pairs: Collection[frozenset[str]] = ADJACENT_FAMILY_PAIRS,
 ) -> RequirementResult:
     """경력 연수 요건 판정. 1단계 같은 직무군 → 2단계 모르는 경험 → 3단계 인접 직무(related만) → not_met."""
-    if req.numeric_kind != "career_years":
-        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 경력 판정 대상이 아니다")
+    _require_kind(req, "career_years", "경력")
     as_of = profile.as_of_month
     if req.min_value is None:  # 공고에 기준이 없다 (5장 "연차 무관")
         return _rule_result(req, "needs_check", "no_threshold", question=QUESTION_NO_THRESHOLD)
@@ -134,8 +139,8 @@ def judge_career_years(
     # 2단계: 직무군을 모르는 경험까지 더하면 충족하는가
     unknown = [e for e in counted if e.category is None]
     second_months = first_months | month_set(unknown, as_of)
+    used_unknown = _adding(first_months, unknown, as_of)
     if len(second_months) >= need:
-        used_unknown = _adding(first_months, unknown, as_of)
         return _rule_result(
             req, "needs_check", "category_unclear", compared=shortfall, used=first + used_unknown,
             question=f"{_titles(used_unknown)} 경험은 어떤 직무 경험인가요?",
@@ -146,7 +151,6 @@ def judge_career_years(
         adjacent = [e for e in counted if e.category not in (None, family) and is_adjacent(family, e.category, adjacent_pairs)]
         if len(second_months | month_set(adjacent, as_of)) >= need:
             used_adjacent = _adding(second_months, adjacent, as_of)
-            used_unknown = _adding(first_months, unknown, as_of)
             return _rule_result(
                 req, "needs_check", "scope_unclear", compared=shortfall, used=first + used_unknown + used_adjacent,
                 question=f'이 공고의 "관련 경력"에 {_titles(used_adjacent)} 경험이 포함되는지 공고를 확인해 보세요',
@@ -158,9 +162,6 @@ def judge_career_years(
 # =====================================================================
 # 학력·전공 요건 판정 (eligibility.md 6, 7장)
 # =====================================================================
-
-DEGREE_LABELS = {"high_school": "고졸", "associate": "전문학사", "bachelor": "학사", "master": "석사", "doctorate": "박사"}
-
 
 def _education_evidence(profile: EligibilityProfile, *indexes: int) -> list[ProfileEvidence]:
     """학력 항목의 raw 인용. raw가 없는 항목은 인용하지 않는다 (1-2)."""
@@ -178,28 +179,27 @@ def _highest(profile: EligibilityProfile, status: str) -> tuple[int, Education] 
 
 def judge_education(req: JobRequirement, profile: EligibilityProfile) -> RequirementResult:
     """학력 요건 판정. 졸업한 학력 중 가장 높은 것과 비교하고, 못 미치면 졸업 예정 학력을 본다 (6장)."""
-    if req.numeric_kind != "education":
-        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 학력 판정 대상이 아니다")
+    _require_kind(req, "education", "학력")
     if not profile.education:
         return _rule_result(req, "needs_check", "no_profile_info", question=QUESTION_NO_EDUCATION)
 
     need = DEGREE_ORDER[req.min_degree]
-    need_label = DEGREE_LABELS[req.min_degree]
+    need_label = DISPLAY_LABELS[req.min_degree]
     graduated = _highest(profile, "graduated")  # 재학·중퇴는 그 학력을 갖지 않은 것으로 본다
     if graduated and DEGREE_ORDER[graduated[1].degree] >= need:
         i, edu = graduated
         return _rule_result(
-            req, "met", compared=f"{DEGREE_LABELS[edu.degree]} 졸업 ≥ {need_label}",
+            req, "met", compared=f"{DISPLAY_LABELS[edu.degree]} 졸업 ≥ {need_label}",
             evidence=_education_evidence(profile, i),
         )
 
-    shortfall = f"{DEGREE_LABELS[graduated[1].degree] if graduated else '졸업 학력 없음'} < {need_label}"
+    shortfall = f"{DISPLAY_LABELS[graduated[1].degree] if graduated else '졸업 학력 없음'} < {need_label}"
     graduating = _highest(profile, "graduating")
     if graduating and DEGREE_ORDER[graduating[1].degree] >= need:
         i, edu = graduating
         if req.allows_graduating:
             return _rule_result(
-                req, "met", compared=f"{DEGREE_LABELS[edu.degree]} 졸업예정 ≥ {need_label}",
+                req, "met", compared=f"{DISPLAY_LABELS[edu.degree]} 졸업예정 ≥ {need_label}",
                 evidence=_education_evidence(profile, i),
             )
         return _rule_result(
@@ -223,19 +223,20 @@ def normalize_major(name: str) -> str:
 
 def judge_major(req: JobRequirement, profile: EligibilityProfile) -> RequirementResult:
     """전공 요건 판정. 정리한 이름이 정확히 같을 때만 충족이고, 다르면 미충족이 아니라 확인 필요다 (7장)."""
-    if req.numeric_kind != "major":
-        raise ValueError(f"요건 {req.id}: numeric_kind={req.numeric_kind}는 전공 판정 대상이 아니다")
-    with_majors = [i for i, e in enumerate(profile.education) if e.majors]
+    _require_kind(req, "major", "전공")
+    # 정리한 결과가 빈 이름은 전공으로 보지 않는다 (7-2 4번)
+    majors_of = {i: [m for m in e.majors if normalize_major(m)] for i, e in enumerate(profile.education)}
+    with_majors = [i for i, majors in majors_of.items() if majors]
     if not with_majors:
         return _rule_result(req, "needs_check", "no_profile_info", question=QUESTION_NO_MAJOR)
 
-    wanted = {normalize_major(n): n for n in req.major_names}
+    wanted = {key: n for n in req.major_names if (key := normalize_major(n))}
     for i in with_majors:
-        for major in profile.education[i].majors:
+        for major in majors_of[i]:
             if (hit := wanted.get(normalize_major(major))) is not None:
                 return _rule_result(req, "met", compared=f"{major} = {hit}", evidence=_education_evidence(profile, i))
 
-    have = ", ".join(m for i in with_majors for m in profile.education[i].majors)
+    have = ", ".join(m for i in with_majors for m in majors_of[i])
     names = ", ".join(req.major_names)
     return _rule_result(
         req, "needs_check", "scope_unclear", compared=f"{have} ≠ {names}",

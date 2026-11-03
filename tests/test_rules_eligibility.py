@@ -1233,13 +1233,6 @@ def test_ai_not_met_is_reverted_during_assembly():
     assert result.verdict == "conditional"
 
 
-def test_user_denied_keeps_not_met_and_makes_not_eligible():
-    gate, profile, reqs = small_case(skill_req("S1"))
-    given = ai_judgement("not_met", "user_denied", status_decided_by="user")
-    result = build_result(gate, profile, reqs, {"S1": given})
-    assert (result.verdict, result.decisive_requirement_ids) == ("not_eligible", ["S1"])
-
-
 def test_fabricated_evidence_stops_assembly():
     gate, profile, reqs = small_case(skill_req("S1"))
     given = ai_judgement(profile_evidence=[field_ev("skills", "지어낸 스킬")])
@@ -1300,3 +1293,180 @@ def test_custom_adjacent_pairs_reach_career_judgement():
     custom = build_result(gate, profile, [req], {}, adjacent_pairs=frozenset()).requirement_results[0]
     assert (default.status, default.reason_code) == ("needs_check", "scope_unclear")  # 개발↔QA는 기본 인접 쌍
     assert (custom.status, custom.reason_code) == ("not_met", "below_threshold")
+
+
+# ---------------------------------------------------------------------
+# 문서 <-> 코드 대조: 정책 3-1 "코드가 정하는 질문 문구" 표
+# ---------------------------------------------------------------------
+ELIGIBILITY_POLICY = Path(__file__).parent.parent / "docs" / "policies" / "eligibility.md"
+
+
+def policy_question_rows():
+    """3-1 표의 (사유, 만들어지는 곳, 질문 문구) 행."""
+    text = ELIGIBILITY_POLICY.read_text(encoding="utf-8")
+    section = text.split("**코드가 정하는 질문 문구.**", 1)[1].split("### 3-2.", 1)[0]
+    rows = []
+    for line in section.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 3 and cells[0].startswith("`"):
+            rows.append((cells[0].strip("`"), cells[1], cells[2]))
+    return rows
+
+
+def policy_phrase(reason, where_contains):
+    found = [q for r, where, q in policy_question_rows() if r == reason and where_contains in where]
+    assert len(found) == 1, (reason, where_contains, found)
+    return found[0].split(" (", 1)[0]  # 괄호 안은 여러 개일 때의 안내라 문구가 아니다
+
+
+def test_policy_question_table_has_the_expected_rows():
+    assert [(r, w) for r, w, _ in policy_question_rows()] == [
+        ("no_threshold", "5장 \"연차 무관\""), ("no_profile_info", "6장 학력 칸이 빔"), ("no_profile_info", "7장 전공 칸이 빔"),
+        ("no_profile_info", "4장 경험 목록이 빔"), ("graduation_pending", "6장"), ("category_unclear", "4장 2단계"),
+        ("scope_unclear", "7장 전공명이 다름"), ("scope_unclear", "4-1 인접 직무 경험"),
+    ]
+
+
+def test_fixed_question_phrases_match_policy_3_1():
+    no_exp = judge_career_years(career_req(3), prof())
+    no_threshold = judge_career_years(career_req(None, family=None), prof())
+    no_edu = judge_education(edu_req("bachelor"), eprof())
+    no_major = judge_major(major_req("경제학"), eprof())
+    pending = judge_education(edu_req("bachelor"), eprof(edu("bachelor", "graduating")))
+    assert no_threshold.question_for_user == policy_phrase("no_threshold", "5장")
+    assert no_edu.question_for_user == policy_phrase("no_profile_info", "6장")
+    assert no_major.question_for_user == policy_phrase("no_profile_info", "7장")
+    assert no_exp.question_for_user == policy_phrase("no_profile_info", "4장")
+    assert pending.question_for_user == policy_phrase("graduation_pending", "6장")
+
+
+def test_template_question_phrases_match_policy_3_1():
+    unknown = judge_career_years(career_req(1), prof(job("a", "2026-01", "2026-06", SP), job("u", "2025-07", "2025-12", None, title="미분류 경험")))
+    adjacent = judge_career_years(career_req(1, basis="related"), prof(job("a", "2026-01", "2026-06", SP), job("p", "2025-07", "2025-12", PM, title="PM 경험")))
+    major = judge_major(major_req("경제학", "통계학"), eprof(edu("bachelor", majors=["경영학"])))
+    assert unknown.question_for_user == policy_phrase("category_unclear", "2단계").replace("{경험 제목}", "미분류 경험")
+    assert adjacent.question_for_user == policy_phrase("scope_unclear", "인접").replace("{경험 제목}", "PM 경험")
+    assert major.question_for_user == (
+        policy_phrase("scope_unclear", "전공명").replace("{전공명 목록}", "경제학, 통계학").replace("{지원자 전공}", "경영학"))
+
+
+def test_every_needs_check_reason_the_code_can_emit_has_a_policy_row_or_is_ai_only():
+    """코드가 내는 사유는 3-1 질문 표에 있어야 한다. level_unclear는 AI 몫이라 표에 없다."""
+    in_table = {r for r, _, _ in policy_question_rows()}
+    assert in_table == {"no_threshold", "no_profile_info", "graduation_pending", "category_unclear", "scope_unclear"}
+
+
+# ---------------------------------------------------------------------
+# 코드 리뷰 반영: 원시 딕셔너리 신뢰 경계, 요건 id 중복, 빈 전공명, 유한하지 않은 기준값
+# ---------------------------------------------------------------------
+def test_raw_dict_claiming_user_decision_is_treated_as_ai_and_reverted():
+    """LLM 출력이 스스로 user라고 적어도 not_met을 살리지 못한다."""
+    gate, profile, reqs = small_case(skill_req("S1"))
+    given = ai_judgement("not_met", "user_denied", status_decided_by="user")
+    res = build_result(gate, profile, reqs, {"S1": given}).requirement_results[0]
+    assert (res.status, res.reason_code, res.status_decided_by, res.interpretation_note) == ("needs_check", "scope_unclear", "ai", NOTE)
+
+
+def test_raw_any_of_item_claiming_user_decision_is_reverted():
+    req = any_of_req()
+    gate, profile, _ = small_case()
+    given = {"item_results": [raw_item(0, "not_met", "user_denied", decided_by="user"),
+                              raw_item(1, "not_met", "user_denied", decided_by="user")]}
+    res = build_result(gate, profile, [req], {"R1": given}).requirement_results[0]
+    assert [it.status for it in res.item_results] == ["needs_check", "needs_check"]
+    assert all(it.status_decided_by == "ai" for it in res.item_results)
+    assert res.interpretation_note == NOTE
+
+
+def test_user_decision_enters_as_validated_result_object():
+    gate, profile, reqs = small_case(skill_req("S1"))
+    denied = RequirementResult(requirement_id="S1", status="not_met", reason_code="user_denied",
+                               status_decided_by="user", evidence_checked_by="ai")
+    result = build_result(gate, profile, reqs, {"S1": denied})
+    assert (result.verdict, result.decisive_requirement_ids) == ("not_eligible", ["S1"])
+
+
+def test_raw_preference_dict_without_status_is_not_given_a_decider():
+    """status가 없는 원시 딕셔너리에는 판정 주체를 만들어 넣지 않는다 (preference는 판정 대상이 아니다)."""
+    from core.rules import _as_ai_output
+    assert _as_ai_output({"requirement_id": "P1", "status": None}) == {"requirement_id": "P1", "status": None}
+
+
+def test_duplicate_requirement_ids_are_an_error_before_any_judgement_is_used():
+    gate, profile, _ = small_case()
+    with pytest.raises(ValueError, match="요건 id가 겹친다: \\['S1'\\]"):
+        build_result(gate, profile, [skill_req("S1"), skill_req("S1"), skill_req("S2")], {"S1": ai_judgement(), "S2": ai_judgement()})
+
+
+@pytest.mark.parametrize("name", ["전공", " 전공 ", "", "   "])
+def test_major_name_that_normalizes_to_empty_is_ignored(name):
+    assert normalize_major(name) == ""
+
+
+def test_profile_major_that_normalizes_to_empty_counts_as_not_entered():
+    for blank in ("", "전공", "  "):
+        result = judge_major(major_req("경제학"), eprof(edu("bachelor", majors=[blank], raw="원문")))
+        check(result, "needs_check", "no_profile_info")
+        assert result.question_for_user == "전공을 입력해 주세요" and result.profile_evidence == []
+
+
+def test_empty_required_major_name_never_matches_empty_profile_major():
+    """공고 전공명이 '전공'뿐이고 지원자 전공도 '전공'이면 일치로 치지 않는다."""
+    check(judge_major(major_req("전공"), eprof(edu("bachelor", majors=["전공"]))), "needs_check", "no_profile_info")
+
+
+def test_blank_required_name_is_skipped_but_real_names_still_match():
+    check(judge_major(major_req("전공", "경제학"), eprof(edu("bachelor", majors=["경제학과"]))), "met", compared="경제학과 = 경제학")
+
+
+def test_blank_required_name_alone_gives_scope_unclear_not_met():
+    result = judge_major(major_req("전공"), eprof(edu("bachelor", majors=["경제학"])))
+    check(result, "needs_check", "scope_unclear", "경제학 ≠ 전공")
+
+
+def test_blank_profile_majors_are_left_out_of_the_comparison_text():
+    result = judge_major(major_req("경제학"), eprof(edu("bachelor", majors=["", "경영학"], raw="학부")))
+    check(result, "needs_check", "scope_unclear", "경영학 ≠ 경제학")
+
+
+@pytest.mark.parametrize("field", ["min_value", "max_value"])
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -float("inf")])
+def test_non_finite_career_thresholds_are_rejected_by_the_schema(field, bad):
+    with pytest.raises(ValueError):
+        career_req(**{field: bad}) if field == "min_value" else JobRequirement(
+            id="R1", level="required", type="numeric", text="t", numeric_kind="career_years", min_value=1, max_value=bad)
+
+
+# ---------------------------------------------------------------------
+# 자동 변이 점검에서 나온 경계값·동순위 구멍
+# ---------------------------------------------------------------------
+def test_verdict_levels_are_strictly_ordered_even_when_input_order_is_reversed():
+    """eligible/conditional/not_eligible이 같은 순위로 취급되면 입력 순서가 결과를 정한다. 거꾸로 넣어도 같아야 한다."""
+    reversed_input = [("c", "not_eligible", "primary"), ("b", "conditional", "primary"), ("a", "eligible", "primary")]
+    assert rank(reversed_input) == ["a", "b", "c"]
+    assert rank([("b", "conditional", "primary"), ("a", "eligible", "primary")]) == ["a", "b"]
+    assert rank([("c", "not_eligible", "primary"), ("b", "conditional", "primary")]) == ["b", "c"]
+
+
+def test_ranking_groups_are_strictly_ordered_even_when_input_order_is_reversed():
+    reversed_input = [("out", "eligible", "out_of_scope"), ("mismatch", "eligible", "job_mismatch"), ("main", "eligible", "primary")]
+    assert rank(reversed_input) == ["main", "mismatch", "out"]
+    assert rank([("out", "eligible", "out_of_scope"), ("mismatch", "eligible", "job_mismatch")]) == ["mismatch", "out"]
+    assert rank([("mismatch", "eligible", "job_mismatch"), ("main", "eligible", "primary")]) == ["main", "mismatch"]
+
+
+def test_fractional_and_zero_scores_sort_by_value():
+    entries = [("zero", "eligible", "primary"), ("half", "eligible", "primary"), ("one", "eligible", "primary")]
+    assert rank(entries, {"zero": 0, "half": 0.5, "one": 1}) == ["one", "half", "zero"]
+
+
+def test_evidence_education_index_equal_to_length_is_rejected_not_crashing():
+    """education이 2개일 때 education[2]는 범위 밖이다. IndexError가 아니라 근거 검증 오류여야 한다."""
+    with pytest.raises(ValueError, match="근거로 쓸 수 없는 field 'education\\[2\\]'"):
+        check_profile_evidence([ev_result(field_ev("education[2]", "OO"))], evidence_profile())
+
+
+def test_one_month_threshold_with_empty_profile_is_no_profile_info():
+    """기준이 정확히 1개월이어도(1/12년) 빈 프로필은 '경력 없음'이 아니라 '정보 없음'이다."""
+    check(judge_career_years(career_req(1 / 12), prof()), "needs_check", "no_profile_info")
+    check(judge_career_years(career_req(1 / 12), prof(job("a", "2020-01", "2020-12", SALES))), "not_met", "below_threshold", "0개월 < 1개월(0.0833333년)")

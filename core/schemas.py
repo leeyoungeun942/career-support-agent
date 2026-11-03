@@ -366,8 +366,8 @@ class JobRequirement(BaseModel):
     combine: Combine = "all"
     items: list[RequirementItem] = []
     numeric_kind: NumericKind | None = None
-    min_value: float | None = Field(default=None, ge=0, description="연 단위. 0은 지원에 필요한 최소 경력이 없다는 뜻")
-    max_value: float | None = Field(default=None, ge=0, description="상한 기록용. 판정에 쓰지 않는다")
+    min_value: float | None = Field(default=None, ge=0, allow_inf_nan=False, description="연 단위. 0은 지원에 필요한 최소 경력이 없다는 뜻")
+    max_value: float | None = Field(default=None, ge=0, allow_inf_nan=False, description="상한 기록용. 판정에 쓰지 않는다")
     career_family: str | None = Field(default=None, description="JF_*. None이면 모든 인턴·경력을 합산")
     career_family_basis: CareerFamilyBasis | None = None
     min_degree: Degree | None = None
