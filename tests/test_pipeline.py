@@ -1,13 +1,16 @@
 """run_pipeline과 pipeline_run.v1 검증 (data-contract 3장, 정책 eligibility.md 14장; 이슈 #7). 네트워크를 쓰지 않는다."""
+import json
 import random
 
 import pytest
 
 from core.job_gate_mock import make_label_mock
+from core.job_gate_result import judge_posting
 from core.llm_client import FakeClient, LLMConfigError, LLMQuotaExceeded, LLMRequest, LLMStageError, UsageLog
 from core.llm_mock import evidence_answer, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
 from core.pipeline_run import FAILURE_TEXT, PipelineJob, PipelineRun
+from core.rules import ProfileEvidenceError
 from pipeline_helpers import (BY_ID, EVIDENCE, GATES, IDS, NOW, POLICY_14_ORDER, PROFILE, REF, SAMPLES, Wrap, clients, run,
                               scenario)
 
@@ -160,6 +163,70 @@ def test_malformed_gate_input_is_input_invalid_for_that_job_only():
     r = run_gate([bad, gate_job("g-1")])
     assert (r.jobs[0].evaluation_status, r.jobs[0].failure_code, r.jobs[0].gate) == ("failed", "input_invalid", None)
     assert r.jobs[1].evaluation_status == "completed" and r.ranking == ["g-1"]
+
+
+def injected_job_with_detail():
+    """detail(공고 업무 항목 원문)이 든 게이트 결과를 주입한 공고."""
+    gate = judge_posting("g-1", POSTING, "JF_SERVICE_PLANNING", SERVICE_JUDGE)  # with_detail 기본값은 True
+    assert gate.detail is not None and POSTING["items"][0]["text"] in gate.detail.model_dump_json()
+    return ScenarioJob(job_id="g-1", posting_text=synthetic_posting(G_SAMPLE), gate=gate)
+
+
+def test_injected_gate_detail_is_dropped_like_an_executed_gate():
+    mock_e, mock_j = clients([G_SAMPLE])
+    r = run_pipeline([injected_job_with_detail()], PROFILE, REF, mock_e, mock_j, now=NOW)
+    assert r.jobs[0].gate.detail is None and r.jobs[0].evaluation_status == "completed"
+    assert POSTING["items"][0]["text"] not in r.model_dump_json()  # 저장될 JSON에 업무 항목 원문이 없다
+
+
+def test_a_run_whose_gate_still_has_detail_is_rejected_when_loaded():
+    gate = injected_job_with_detail().gate
+    data = run().jobs[0].model_dump()
+    data["gate"] = json.loads(gate.model_dump_json())
+    data["job_id"] = data["eligibility"]["job_id"] = gate.job_id
+    data["gate"]["job_id"] = gate.job_id
+    with pytest.raises(ValueError, match="gate.detail"):
+        PipelineJob(**data)
+
+
+@pytest.mark.parametrize("bad", [
+    None, [], {}, {"job_title": 5, "items": []}, {"job_title": "x", "items": "업무"}, {"job_title": "x", "items": [5]},
+    {"job_title": "x", "items": [{"heading": "h"}]}, {"job_title": "x", "items": [{"text": 5}]},
+    {"job_title": "x", "items": [{"text": "t", "heading": 5}]}, {"job_title": "x", "position": 5, "items": []},
+    {"job_title": "x", "items": [], "category": "z"},
+])
+def test_each_malformed_gate_input_is_input_invalid_and_the_next_job_continues(bad):
+    r = run_gate([gate_job("g-0", bad), gate_job("g-1")])
+    assert (r.jobs[0].evaluation_status, r.jobs[0].failure_code, r.jobs[0].gate) == ("failed", "input_invalid", None)
+    assert r.jobs[1].evaluation_status == "completed"
+
+
+def test_gate_input_with_no_items_is_not_an_input_error():
+    r = run_gate([gate_job("g-1", {"job_title": "서비스 기획자", "items": []})])
+    assert r.jobs[0].evaluation_status == "completed" and r.jobs[0].gate.result == "review_needed"  # 정보 부족 판정이다
+
+
+@pytest.mark.parametrize("error", [TypeError("판정 함수의 결함"), KeyError("label"), AttributeError("x")])
+def test_defects_inside_the_gate_judge_are_not_hidden_as_input_errors(error):
+    def broken(request):
+        raise error
+
+    mock_e, mock_j = clients([G_SAMPLE])
+    # 규칙이 단서를 찾지 못해 판정 AI 자리를 부르는 입력이다 (POSTING은 규칙만으로 결정돼 AI 자리를 부르지 않는다)
+    needs_ai = {"job_title": "담당자 모집", "position": "담당자", "items": [{"text": "회사의 다양한 업무를 지원하고 필요한 일을 수행"}, {"text": "기타 관련 업무 전반"}]}
+    with pytest.raises(type(error)):
+        run_pipeline([gate_job("g-1", needs_ai)], PROFILE, REF, mock_e, mock_j, desired_family="JF_SERVICE_PLANNING", gate_judge=broken, now=NOW)
+
+
+@pytest.mark.parametrize("error,code", [
+    (ProfileEvidenceError("원문이 아닌 다른 문구"), "evidence_check_failed"),   # 메시지 문구와 무관하게 타입으로 가른다
+    (ValueError("프로필 근거 검증 실패"), "assembly_failed"),                 # 문구가 같아도 타입이 다르면 조립 실패다
+    (ValueError("anything"), "assembly_failed"),
+])
+def test_failure_code_follows_the_exception_type_not_the_message(error, code):
+    mock_e, mock_j = clients()
+    r = run(extract=mock_e, evidence=Wrap(mock_j, {("find_evidence", "sample-1"): error}))
+    assert r.jobs[0].failure_code == code and r.counts["failed"] == 1
 
 
 def test_invalid_scenario_is_refused_instead_of_recorded_per_job():

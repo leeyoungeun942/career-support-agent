@@ -529,7 +529,7 @@
 | `failure_code` | 3-3의 코드 또는 `null` | `completed`이면 `null`, 아니면 반드시 있다 |
 | `included_in_ranking` | `true` / `false` | **계산값.** `evaluation_status=completed`일 때만 `true` |
 | `rank` | 1부터의 정수 또는 `null` | **계산값.** `ranking`에서의 위치. 정렬에 들어가지 않으면 `null` |
-| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null`. **`detail`은 비운다**: `detail.items`에 공고 업무 항목 원문이 들어 있어 "공고 원문은 저장하지 않는다"(3-4)와 맞지 않는다 |
+| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null`. **`detail`은 비운다**: `detail.items`에 공고 업무 항목 원문이 들어 있어 "공고 원문은 저장하지 않는다"(3-4)와 맞지 않는다. 게이트를 실행했든 결과를 주입했든 같고, `detail`이 있는 결과 파일은 읽을 때 오류다 |
 | `eligibility` | `eligibility_result.v1` 또는 `null` | `completed`일 때만 있다 |
 | `reference_only` | `true` / `false` / `null` | **계산값.** `eligibility.reference_only`. 화면에 "참고용 평가"를 붙인다. `eligibility`가 없으면 `null` |
 | `summary` | 문자열 | **계산값.** `completed`이면 `eligibility.summary` (2-7, 코드가 만든 템플릿). 아니면 3-3의 화면 문구. LLM이 쓰지 않는다 |

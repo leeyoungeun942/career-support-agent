@@ -105,6 +105,8 @@ class PipelineJob(BaseModel):
                 raise ValueError(f"{where}: completed가 아니면 eligibility와 rank가 없어야 한다")
             if self.gate is None and self.failure_code != "input_invalid":
                 raise ValueError(f"{where}: gate가 없는 것은 input_invalid일 때뿐이다")
+        if self.gate is not None and self.gate.detail is not None:
+            raise ValueError(f"{where}: gate.detail은 비워야 한다 (공고 업무 항목 원문을 저장하지 않는다, data-contract 3-2)")
         for name, part in (("gate", self.gate), ("eligibility", self.eligibility)):
             if part is not None and part.job_id != self.job_id:
                 raise ValueError(f"{where}: {name}의 job_id가 {part.job_id!r}이다")
@@ -175,4 +177,3 @@ class PipelineRun(BaseModel):
         jobs = [j if j.eligibility is None else j.model_copy(update={"eligibility": strip_profile_evidence(j.eligibility)})
                 for j in self.jobs]
         return PipelineRun.model_validate({**self.model_dump(), "jobs": [j.model_dump() for j in jobs], "profile_evidence_included": False})
-

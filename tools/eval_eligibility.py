@@ -35,7 +35,7 @@ from core.llm_client import (
 )
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import assess_eligibility
-from core.rules import rank_jobs
+from core.rules import ProfileEvidenceError, rank_jobs
 from core.schemas import DISPLAY_LABELS, EligibilityProfile, JobGateResult
 
 REPO = Path(__file__).resolve().parents[1]
@@ -206,7 +206,7 @@ def run_all(samples, profile, gates, postings, extract_client, evidence_client, 
         except LLMStageError:
             row["error"] = "단계 실패(통신 또는 스키마)"
         except ValueError as e:
-            row["error"] = "근거 검증 실패" if "프로필 근거 검증 실패" in str(e) else "결과 조립 실패"
+            row["error"] = "근거 검증 실패" if isinstance(e, ProfileEvidenceError) else "결과 조립 실패"
         rows.append(row)
     return rows, results, stopped
 

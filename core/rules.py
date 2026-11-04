@@ -11,7 +11,7 @@ import math
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 
-from core.rules_ai import check_profile_evidence, merge_any_of, normalize_ai_result
+from core.rules_ai import ProfileEvidenceError, check_profile_evidence, merge_any_of, normalize_ai_result
 from core.rules_numeric import (
     ADJACENT_FAMILY_PAIRS,
     career_experiences,
@@ -36,6 +36,7 @@ from core.schemas import (
 
 __all__ = [
     "ADJACENT_FAMILY_PAIRS",
+    "ProfileEvidenceError",
     "build_result",
     "career_experiences",
     "check_gate_consistency",

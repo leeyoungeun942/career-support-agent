@@ -12,12 +12,12 @@ from datetime import datetime, timezone
 
 from agents.job_analyzer import extract_requirements
 from agents.profile_analyzer import find_evidence
-from core.job_gate import AiJudge, Dictionary
+from core.job_gate import POSTING_KEYS, AiJudge, Dictionary
 from core.job_gate_result import judge_posting
 from core.llm_client import LLMClient, LLMQuotaExceeded, LLMStageError, UsageLog
 from core.pipeline_run import PipelineJob, PipelineRun, ProfileRef, PromptVersions, RunInfo
 from core.prompts import load_prompt
-from core.rules import build_result, rank_jobs
+from core.rules import ProfileEvidenceError, build_result, rank_jobs
 from core.schemas import EligibilityProfile, EligibilityResult, JobGateResult, JobRequirement
 
 
@@ -67,7 +67,33 @@ def _failure_code(error: Exception) -> str:
         return "quota_exhausted"
     if isinstance(error, LLMStageError):
         return "stage_failed"
-    return "evidence_check_failed" if "프로필 근거 검증 실패" in str(error) else "assembly_failed"
+    # 범주는 예외 타입으로 가른다. 메시지 문구가 바뀌어도 분류가 달라지지 않는다
+    return "evidence_check_failed" if isinstance(error, ProfileEvidenceError) else "assembly_failed"
+
+
+class GateInputError(ValueError):
+    """게이트에 넣을 공고 입력(직무명, 모집부문, 업무 항목)이 없거나 형식이 틀렸다. 메시지에 입력 값을 넣지 않는다."""
+
+
+def _check_gate_posting(posting) -> None:
+    """게이트 입력을 judge를 부르기 전에 검사한다. 입력 오류는 여기서만 GateInputError가 된다.
+
+    judge나 AI 자리 안에서 나는 TypeError·KeyError 같은 예외는 입력 오류가 아니라 코드 결함이므로 삼키지 않고 그대로 올린다.
+    """
+    if not isinstance(posting, dict):
+        raise GateInputError("게이트 입력이 없거나 딕셔너리가 아니다")
+    if unsupported := sorted(set(posting) - POSTING_KEYS):
+        raise GateInputError(f"게이트가 받지 않는 입력 칸: {unsupported}")
+    if not isinstance(posting.get("job_title"), str):
+        raise GateInputError("job_title이 없거나 문자열이 아니다")
+    if not isinstance(posting.get("position", ""), str):
+        raise GateInputError("position이 문자열이 아니다")
+    items = posting.get("items")
+    if not isinstance(items, list) or not all(isinstance(it, dict) and isinstance(it.get("text"), str) for it in items):
+        raise GateInputError("items가 목록이 아니거나, 항목에 문자열 text가 없다")
+    for it in items:
+        if not isinstance(it.get("heading", ""), str):
+            raise GateInputError("항목의 heading이 문자열이 아니다")
 
 
 def run_pipeline(
@@ -103,13 +129,15 @@ def run_pipeline(
     gates: dict[str, JobGateResult | None] = {}
     dic = None if all(injected) else Dictionary()
     for job in jobs:
-        if job.gate is not None:
-            gates[job.job_id] = job.gate
+        if job.gate is not None:  # 주입한 결과도 실행한 결과와 같이 detail(공고 업무 항목 원문)을 비운다
+            gates[job.job_id] = job.gate.model_copy(update={"detail": None})
             continue
         try:
-            gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
-        except (ValueError, KeyError, TypeError):  # 게이트 입력이 없거나 형식이 틀림. 메시지는 입력 값을 담을 수 있어 옮기지 않는다
+            _check_gate_posting(job.gate_posting)
+        except GateInputError:  # 입력 오류만 공고별 실패로 남긴다. 메시지는 옮기지 않는다
             gates[job.job_id] = None
+            continue
+        gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
 
     entries: dict[str, dict] = {}
     done: list[tuple[str, EligibilityResult]] = []

@@ -114,8 +114,15 @@ def _evidence_problem(profile: EligibilityProfile, ev: ProfileEvidence) -> str |
     return None
 
 
+class ProfileEvidenceError(ValueError):
+    """프로필 근거 인용이 프로필 원문과 맞지 않는다. 호출하는 쪽이 실패 범주를 메시지가 아니라 이 타입으로 가른다.
+
+    ValueError의 하위 타입이라 기존에 ValueError를 잡던 곳은 그대로 동작한다.
+    """
+
+
 def check_profile_evidence(results: Iterable[RequirementResult], profile: EligibilityProfile) -> None:
-    """모든 profile_evidence(any_of 항목 포함)가 프로필 원문에 있는지 검사한다. 어긋난 곳을 모아 ValueError로 낸다."""
+    """모든 profile_evidence(any_of 항목 포함)가 프로필 원문에 있는지 검사한다. 어긋난 곳을 모아 ProfileEvidenceError(ValueError)로 낸다."""
     problems = []
     for res in results:
         located = [(res.requirement_id, ev) for ev in res.profile_evidence]
@@ -124,4 +131,4 @@ def check_profile_evidence(results: Iterable[RequirementResult], profile: Eligib
             if problem := _evidence_problem(profile, ev):
                 problems.append(f"{where}: {problem}")
     if problems:
-        raise ValueError("\n".join(["프로필 근거 검증 실패", *problems]))
+        raise ProfileEvidenceError("\n".join(["프로필 근거 검증 실패", *problems]))
