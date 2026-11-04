@@ -1,6 +1,6 @@
 """선택한 공고를 자소서·포트폴리오 Agent에 넘기는 형식 (docs/data-contract.md 4장, selected_job.v1).
 
-**초안이다.** 받는 쪽 팀원과 칸을 합의하기 전의 최소 형식이다. 합의되면 data-contract 4장과 이 파일을 함께 고친다.
+**내부 초안이다.** 선택한 공고의 판정 결과를 잃지 않고 넘기는 최소 형식이다. 자소서·포트폴리오 생성 이슈에서 필요한 칸(공고 내용, 프로필 내용, 쓸 수 있는 사실의 구분 등)이 정해지면 data-contract 4장과 이 파일을 함께 고친다.
 - 사용자가 고르는 것이라 `not_eligible`이나 참고용 공고도 선택할 수 있다. 대신 경고 코드와 문구가 따라간다.
 - 경고는 결과에서 계산하는 값이다. 파일을 읽을 때 다시 계산하므로 파일에서 지워도 사라지지 않는다.
 - 평가를 마치지 못한 공고(failed, not_run)는 선택할 수 없다.
@@ -41,7 +41,7 @@ class GateSummary(BaseModel):
 
 
 class SelectedJob(BaseModel):
-    """사용자가 고른 공고 1건과 그 평가. 자소서·포트폴리오 Agent의 입력 초안."""
+    """사용자가 고른 공고 1건과 그 평가. 자소서·포트폴리오 생성의 입력 초안."""
 
     schema_version: Literal["selected_job.v1"] = SELECTED_SCHEMA_VERSION
     run_id: str
