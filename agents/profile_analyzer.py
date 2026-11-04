@@ -135,8 +135,9 @@ def _body(j: dict, job_quote: str) -> tuple[dict, bool]:
 
 def _to_raw(req: JobRequirement, j: dict) -> dict:
     if req.combine == "any_of":
-        if j["status"] is not None or not j["item_results"]:
-            raise LLMStageError(f"{STAGE}: any_of 요건 {req.id}는 항목별(item_results)로만 판정해야 한다")
+        if not j["item_results"]:
+            raise LLMStageError(f"{STAGE}: any_of 요건 {req.id}는 항목별(item_results)로 판정해야 한다")
+        # 항목별 결과와 함께 온 요건 단위 status·사유·근거·질문은 쓰지 않는다. 요건 전체 값은 항목에서 합친다 (정책 13-1, 5단계)
         item_text = {it.index: it.text for it in req.items}
         items, lowered = [], False
         for item in j["item_results"]:
