@@ -152,3 +152,30 @@ def test_fill_does_not_expand_placeholders_inside_values_and_rejects_missing():
     assert fill("A {{a}} B {{b}}", a="{{b}}", b="x") == "A {{b}} B x"
     with pytest.raises(KeyError):
         fill("{{없음}}")
+
+
+# ---------------------------------------------------------------- 추출 숫자 기록 (정책 13-1, PR #11 리뷰 P2-3)
+
+def test_stats_count_dropped_requirements_by_reason_without_any_content():
+    bad_type = req_raw(text="대졸 이상", type="numeric")  # numeric인데 numeric_kind가 없다 -> 검증 실패
+    unseen = req_raw(text="공고에 없는 지어낸 요건")        # 원문에 없다
+    stats = {}
+    reqs, issues = extract([req_raw(), bad_type, unseen, unseen], issues=["made_up", "partial_extraction"], stats=stats)
+    assert len(reqs) == 1 and issues == ["partial_extraction"]
+    assert stats == {"extracted": 4, "retained": 1, "dropped_text_not_found": 2, "dropped_validation_failed": 1,
+                     "unknown_issue_count": 1, "corrected_by_code": 0}
+    assert all(isinstance(v, int) for v in stats.values())  # 숫자만 담긴다: 원문·모델 출력은 없다
+
+
+def test_stats_are_zero_when_nothing_was_extracted_and_on_failure():
+    stats = {"extracted": 99}
+    extract_requirements("  ", FakeClient([]), "job1", stats=stats)
+    assert stats["extracted"] == 0 and sum(stats.values()) == 0
+    stats = {}
+    extract_requirements(POSTING, FakeClient([LLMStageError("통신 실패")]), "job1", stats=stats)
+    assert sum(stats.values()) == 0
+
+
+def test_stats_are_optional():
+    reqs, _ = extract([req_raw()])
+    assert len(reqs) == 1

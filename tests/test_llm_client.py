@@ -287,7 +287,36 @@ def test_usage_log_has_no_prompt_or_response_content(tmp_path):
     row = json.loads(text)
     assert "프롬프트비밀" not in text and "응답비밀" not in text and SECRET not in text
     assert row["input_tokens"] == 100 and row["output_tokens"] == 20 and row["model"] == "gemini-test"
-    assert set(row) == {"ts", "date_pt", "stage", "job_id", "model", "input_tokens", "output_tokens", "cached", "ok"}
+    assert set(row) == {"ts", "date_pt", "run_id", "stage", "job_id", "model", "config", "prompt_version", "input_tokens", "output_tokens", "cached", "ok"}
+
+
+def test_usage_totals_are_counted_per_run_and_never_summed_across_runs(tmp_path):
+    path = tmp_path / "u.jsonl"
+    for run in ("run-a", "run-b"):
+        log = UsageLog(path, run_id=run)
+        log.record(req(), model="m", input_tokens=100, output_tokens=10)
+        log.record(req(), model="m", ok=False, error="ServerError 503")
+        log.record(req(), model="m", cached=True)
+    log_a = UsageLog(path, run_id="run-a")
+    assert log_a.run_totals() == {"calls": 2, "failed": 1, "cache_hits": 1, "input_tokens": 100, "output_tokens": 10}
+    assert UsageLog(path, run_id="nobody").run_totals()["calls"] == 0
+    assert UsageLog(path).run_id not in ("run-a", "run-b")  # 새 실행은 새 ID를 받는다
+
+
+def test_generation_config_is_part_of_cache_key_and_usage_record(tmp_path):
+    assert cache_key("m", req(), "cfg-a") != cache_key("m", req(), "cfg-b") != cache_key("m", req())
+    client, _, _, log = gemini([OK], tmp_path)
+    client.complete_json(req())
+    row = json.loads(log.path.read_text(encoding="utf-8"))
+    assert row["config"] == client.config_id and len(client.config_id) == 8 and row["prompt_version"] == "1"
+
+
+def test_cached_wrapper_separates_cache_by_generation_config(tmp_path):
+    a, b = FakeClient([{"answer": "a1"}]), FakeClient([{"answer": "b1"}])
+    a.config_id, b.config_id = "cfg-a", "cfg-b"
+    CachedClient(a, extract_dir=tmp_path).complete_json(req())
+    fresh = CachedClient(b, extract_dir=tmp_path).complete_json(req())
+    assert not fresh.cached and fresh.data == {"answer": "b1"}  # 설정이 다르면 앞 실행의 캐시를 쓰지 않는다
 
 
 def test_failed_attempt_logs_error_kind_and_code_but_not_the_message(tmp_path):

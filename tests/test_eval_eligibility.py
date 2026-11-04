@@ -21,6 +21,10 @@ def test_mock_chain_reproduces_policy_17_and_14(capsys):
     assert (metrics["sig_ok"], metrics["verdict_ok"], metrics["decisive_ok"]) == (n, n, n)
     assert metrics["status_ok"] == metrics["status_total"] == 29  # 필수 요건 29개(우대 preference 1개는 비교 대상이 아니다)
     assert metrics["count_ok"] == n
+    assert (metrics["matched"], metrics["expected_required"]) == (29, 29)
+    assert metrics["unmatched_expected"] == metrics["unmatched_extracted"] == 0
+    assert metrics["field_ok"] == metrics["field_total"] and metrics["field_total"] > 0
+    assert metrics["extraction"]["extracted"] == metrics["extraction"]["retained"] == 30
     assert metrics["reason_ok"] == metrics["reason_total"] == 19
     assert metrics["ranked"] == POLICY_14_ORDER
     out = capsys.readouterr().out
@@ -72,7 +76,8 @@ def test_compare_sample_flags_different_requirement_structure():
     reqs, result = _assess(sample)
     other = SAMPLES[0]
     cmp = tool.compare_sample(other, reqs, result)
-    assert cmp["sig_ok"] is False and cmp["rows"] == [] and cmp["decisive_ok"] is None
+    assert cmp["sig_ok"] is False and cmp["only_want"] and cmp["matched"] < cmp["expected_required"]
+    assert cmp["decisive_ok"] is False
 
 
 # ---------------------------------------------------------------- 도구: 입력 점검
@@ -214,7 +219,8 @@ def test_ai_run_reports_stage_failure_per_sample_and_continues(ai_env, monkeypat
     with pytest.raises(SystemExit) as e:
         tool.main(ai_args(postings))
     out = capsys.readouterr().out
-    assert e.value.code == 1 and "[sample-2] 실패" in out and "완료 5/6" in out
+    assert e.value.code == 1 and "[sample-2] 실패: 단계 실패(통신 또는 스키마)" in out and "완료 5/6" in out
+    assert "통신 실패" not in out  # 예외 내용은 옮기지 않고 범주 이름만 낸다
 
 
 def test_ai_run_stops_on_quota_exhaustion(ai_env, monkeypatch, capsys):
@@ -231,6 +237,7 @@ def test_ai_run_stops_on_quota_exhaustion(ai_env, monkeypatch, capsys):
         tool.main(ai_args(postings))
     captured = capsys.readouterr()
     assert e.value.code == 3 and "[sample-3] 실패: 한도 소진" in captured.out and "[sample-4]" not in captured.out
+    assert "일일 한도" not in captured.out
 
 
 def test_mock_output_has_no_posting_text_or_profile_quotes(capsys):
@@ -239,6 +246,9 @@ def test_mock_output_has_no_posting_text_or_profile_quotes(capsys):
     pieces = [a for e in PROFILE.experiences for a in e.actions] + [e.title for e in PROFILE.experiences]
     assert len(pieces) > 5 and all(len(p) > 10 for p in pieces)
     assert all(piece not in out for piece in pieces)
+    # 요건 text(fixture의 요약문 포함)와 합성 공고 원문도 출력하지 않는다: 요건 id와 코드만 나온다
+    assert all(r["text"] not in out for s in SAMPLES for r in s["requirements"] if len(r["text"]) > 6)
+    assert "1-R2←R2" in out
 
 
 # ---------------------------------------------------------------- 파이프라인이 단계 사이에 넘기는 값
@@ -278,20 +288,81 @@ def test_extra_preferred_requirements_do_not_break_comparison():
     reqs, result = assess_eligibility(sample_posting_extra, GATES[sample["job_id"]], PROFILE, FakeClient([answer]),
                                       tool.make_evidence_mock([sample], EVIDENCE))
     cmp = tool.compare_sample(sample, reqs, result)
-    assert cmp["count_ok"] and cmp["sig_ok"] and cmp["decisive_ok"] and cmp["extra_other"] == 1
-    assert all(got.status == tool.expected_status(want) for want, got in cmp["rows"])
+    assert cmp["matched"] == cmp["expected_required"] == 4 and cmp["only_want"] == [] and cmp["only_got"] == []
+    assert cmp["decisive_ok"] and cmp["extra_other"] == 1 and cmp["field_ok"] == cmp["field_total"]
+    assert all(p["result"].status == tool.expected_status(p["want"]) for p in cmp["rows"])
 
 
-def test_same_count_but_different_type_is_count_ok_not_sig_ok():
+def test_different_type_on_a_matched_pair_is_a_field_difference_not_a_missing_requirement():
     sample = SAMPLES[3]
     reqs, result = _assess(sample)
     flipped = [r.model_copy(update={"type": "qualitative" if r.type == "skill" else r.type}) for r in reqs]
     cmp = tool.compare_sample(sample, flipped, result)
-    assert cmp["count_ok"] and not cmp["sig_ok"] and len(cmp["rows"]) == 3
+    assert cmp["matched"] == 3 and not cmp["sig_ok"] and cmp["count_ok"]
+    assert [p["diffs"] for p in cmp["rows"]] == [[], ["type"], []]  # 4-R2(skill)만 qualitative로 바뀜
 
 
-def test_fewer_required_requirements_than_expected_skips_row_comparison():
+def test_fewer_required_requirements_than_expected_reports_the_missing_one_by_id():
     sample = SAMPLES[0]
     reqs, result = _assess(sample)
     cmp = tool.compare_sample(sample, reqs[:-1], result)
-    assert not cmp["count_ok"] and cmp["rows"] == [] and cmp["decisive_ok"] is None
+    assert cmp["only_want"] == ["1-R7"] and cmp["matched"] == 6 and not cmp["count_ok"] and cmp["positional_rows"] == []
+
+
+# ---------------------------------------------------------------- 짝짓기는 순서에 의존하지 않는다 (PR #11 리뷰 P1-2)
+
+def _required(sample):
+    return [r for r in sample["requirements"] if r["level"] == "required"]
+
+
+def test_matching_ignores_the_order_of_the_extracted_requirements():
+    sample = SAMPLES[0]
+    reqs, _ = _assess(sample)
+    expected = _required(sample)
+    forward, _, _ = tool.match_requirements(expected, reqs)
+    reversed_reqs = list(reversed(reqs))
+    pairs, only_w, only_g = tool.match_requirements(expected, reversed_reqs)
+    assert only_w == only_g == [] and len(pairs) == len(expected)
+    assert {(i, len(reqs) - 1 - j) for i, j in pairs} == set(forward)  # 같은 요건끼리 짝지어졌다
+
+
+def test_a_merged_requirement_leaves_the_other_expected_one_unmatched():
+    sample = SAMPLES[5]  # 6번: Excel과 PPT가 따로 있는 정답
+    reqs, _ = _assess(sample)
+    expected = _required(sample)
+    merged = [r for r in reqs if r.id != "R3"]
+    merged_excel = next(r for r in merged if r.id == "R2").model_copy(update={"text": "데이터 관리(Excel)와 보고서 작성(PPT)에 능숙하신 분"})
+    got = [merged_excel if r.id == "R2" else r for r in merged]
+    pairs, only_w, only_g = tool.match_requirements(expected, got)
+    assert len(only_w) == 1 and only_g == [] and len(pairs) == 3
+
+
+def test_unrelated_extracted_requirement_is_reported_as_extracted_only():
+    sample = SAMPLES[3]
+    reqs, _ = _assess(sample)
+    expected = _required(sample)
+    stray = reqs[1].model_copy(update={"id": "R9", "text": "전혀 다른 내용의 자격 문장입니다", "type": "qualitative"})
+    pairs, only_w, only_g = tool.match_requirements(expected, [*reqs, stray])
+    assert len(pairs) == 3 and only_w == [] and only_g == [3]
+
+
+def test_field_diffs_compare_only_what_the_answer_specifies():
+    sample = SAMPLES[0]
+    reqs, _ = _assess(sample)
+    career_want = next(r for r in _required(sample) if r.get("numeric_kind") == "career_years")
+    career_got = next(r for r in reqs if r.numeric_kind == "career_years")
+    assert tool.field_diffs(career_want, career_got) == ([], 4)  # type, numeric_kind, min_value, career_family (max_value는 정답에 없다)
+    wrong = career_got.model_copy(update={"min_value": 1, "career_family": "JF_DEV"})
+    assert set(tool.field_diffs(career_want, wrong)[0]) == {"min_value", "career_family"}
+
+
+def test_ai_fresh_cache_uses_a_run_specific_directory_and_reports_run_totals(ai_env, capsys):
+    tmp, postings = ai_env
+    with pytest.raises(SystemExit) as e:
+        tool.main(ai_args(postings, "--fresh-cache"))
+    out = capsys.readouterr().out
+    assert e.value.code == 0 and "새 캐시" in out and "이번 실행(" in out and "요건 추출 숫자(합계)" in out
+    cache_root = tmp / "results" / "llm_cache"
+    assert not (cache_root / "extract").exists()
+    run_dirs = list(cache_root.glob("run-*"))
+    assert len(run_dirs) == 1 and len(list(run_dirs[0].glob("*.json"))) == 6

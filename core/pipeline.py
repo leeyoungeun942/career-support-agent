@@ -11,13 +11,13 @@ from core.schemas import EligibilityProfile, EligibilityResult, JobGateResult, J
 
 def assess_eligibility(
     posting_text: str, gate: JobGateResult, profile: EligibilityProfile, extract_client: LLMClient,
-    evidence_client: LLMClient, allow_external_profile: bool = False,
+    evidence_client: LLMClient, allow_external_profile: bool = False, stats: dict | None = None,
 ) -> tuple[list[JobRequirement], EligibilityResult]:
     """공고 1건의 자격요건 결과를 만든다. (추출한 요건, 결과)를 돌려준다.
 
     요건 추출이 실패하면 요건 없이 extraction_failed로 결과를 만든다(conditional, 정책 1-4). 근거 찾기 실패(LLMStageError),
-    한도 소진(LLMQuotaExceeded), 근거 검증 실패(ValueError)는 그대로 올린다. 확인하지 못한 요건을 조용히 채우지 않는다 (정책 13-1).
+    한도 소진(LLMQuotaExceeded), 근거 검증 실패(ValueError)는 그대로 올린다. stats를 넘기면 요건 추출의 숫자 기록이 채워진다(13-1). 확인하지 못한 요건을 조용히 채우지 않는다 (정책 13-1).
     """
-    requirements, issues = extract_requirements(posting_text, extract_client, gate.job_id, gate.core_family)
+    requirements, issues = extract_requirements(posting_text, extract_client, gate.job_id, gate.core_family, stats)
     judgements = find_evidence(requirements, profile, evidence_client, allow_external_profile, gate.job_id)
     return requirements, build_result(gate, profile, requirements, judgements, issues)

@@ -4,6 +4,7 @@ LLM은 요건 목록과 extraction_issues 후보만 낸다. 요건 id, extractio
 """
 from pydantic import BaseModel, ValidationError
 
+from core.career_normalizer import normalize_career
 from core.llm_client import LLMClient, LLMRequest, LLMStageError
 from core.prompts import fill, load_prompt
 from core.schemas import (
@@ -53,7 +54,7 @@ class ExtractionResponse(BaseModel):
 
 
 def extract_requirements(
-    posting_text: str, client: LLMClient, job_id: str = "", core_family: str | None = None
+    posting_text: str, client: LLMClient, job_id: str = "", core_family: str | None = None, stats: dict | None = None
 ) -> tuple[list[JobRequirement], list[ExtractionIssue]]:
     """공고 원문에서 요건을 뽑는다 (정책 13장 1단계).
 
@@ -61,7 +62,13 @@ def extract_requirements(
     build_result(requirements=...)와 build_result(extraction_issues=...)에 그대로 넘긴다.
     core_family는 게이트의 핵심 직무군이다. "관련 경력"을 해석할 때만 쓴다 (정책 4-1).
     호출이나 해석이 실패하면 ([], ["extraction_failed"])다. 한도 소진(LLMQuotaExceeded)과 설정 오류는 그대로 올린다.
+    stats를 넘기면 숫자만 채워 준다(정책 13-1): extracted(모델이 낸 수), retained, dropped_text_not_found,
+    dropped_validation_failed, unknown_issue_count, corrected_by_code. 내용은 담지 않는다.
     """
+    counts = {"extracted": 0, "retained": 0, "dropped_text_not_found": 0, "dropped_validation_failed": 0,
+              "unknown_issue_count": 0, "corrected_by_code": 0}
+    if stats is not None:
+        stats.update(counts)
     if not posting_text.strip():
         return [], ["text_unreadable"]
     version, body = load_prompt(STAGE)
@@ -73,24 +80,33 @@ def extract_requirements(
         return [], ["extraction_failed"]
 
     issues: list[str] = [i for i in data["extraction_issues"] if i in ALLOWED_ISSUES]
+    counts["unknown_issue_count"] = len(data["extraction_issues"]) - len(issues)
+    counts["extracted"] = len(data["requirements"])
     kept: list[JobRequirement] = []
-    dropped = False
     for raw in data["requirements"]:
-        req = _to_requirement(raw, posting_text, f"R{len(kept) + 1}")
+        req, reason, corrected = _to_requirement(raw, posting_text, f"R{len(kept) + 1}")
         if req is None:
-            dropped = True
+            counts[f"dropped_{reason}"] += 1
         else:
             kept.append(req)
-    if dropped:
+            counts["corrected_by_code"] += corrected
+    counts["retained"] = len(kept)
+    if counts["dropped_text_not_found"] + counts["dropped_validation_failed"]:
         issues.append("partial_extraction")
+    if stats is not None:
+        stats.update(counts)
     return kept, list(dict.fromkeys(issues))  # type: ignore[return-value]
 
 
-def _to_requirement(raw: dict, posting_text: str, req_id: str) -> JobRequirement | None:
-    """코드 확인: text가 공고 원문의 일부이고 JobRequirement 검증을 통과해야 한다. 어기면 None."""
+def _to_requirement(raw: dict, posting_text: str, req_id: str) -> tuple[JobRequirement | None, str, bool]:
+    """코드 확인: text가 공고 원문의 일부이고 JobRequirement 검증을 통과해야 한다. (요건 또는 None, 버린 이유, 경력 기준을 고쳤는가).
+
+    경력 기준은 원문 표현으로 한 번 더 바로잡는다(정책 5-4).
+    """
     if raw["text"] not in posting_text:
-        return None
+        return None, "text_not_found", False
+    raw, changes = normalize_career(raw)
     try:
-        return JobRequirement(id=req_id, **raw)
+        return JobRequirement(id=req_id, **raw), "", bool(changes)
     except ValidationError:
-        return None
+        return None, "validation_failed", False

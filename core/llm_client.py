@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -101,6 +102,7 @@ class BaseClient:
 
     model = ""
     external = False
+    config_id = ""  # 생성 설정의 식별자. 같은 모델이라도 설정이 다르면 캐시를 나눈다
 
     def complete_json(self, request: LLMRequest) -> LLMResponse:
         raw = self._complete(request)
@@ -151,18 +153,20 @@ class MockClient(BaseClient):
 class UsageLog:
     """호출 수·토큰·캐시 적중·모델 ID만 남긴다. 프롬프트와 응답 내용은 쓰지 않는다 (규칙 03, 정책 16장)."""
 
-    def __init__(self, path: Path = USAGE_LOG_PATH, now: Callable[[], datetime] | None = None):
+    def __init__(self, path: Path = USAGE_LOG_PATH, now: Callable[[], datetime] | None = None, run_id: str | None = None):
         self.path = Path(path)
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self.run_id = run_id or uuid.uuid4().hex[:8]  # 실행마다 따로 센다. 서로 다른 실행의 호출·토큰을 합산하지 않는다
 
     def pacific_date(self) -> str:
         return self._now().astimezone(PACIFIC).date().isoformat()
 
     def record(self, request: LLMRequest, *, model: str, input_tokens: int = 0, output_tokens: int = 0,
-               cached: bool = False, ok: bool = True, error: str | None = None) -> None:
+               cached: bool = False, ok: bool = True, error: str | None = None, config_id: str = "") -> None:
         row = {
             "ts": self._now().astimezone(timezone.utc).isoformat(timespec="seconds"),
-            "date_pt": self.pacific_date(), "stage": request.stage, "job_id": request.job_id, "model": model,
+            "date_pt": self.pacific_date(), "run_id": self.run_id, "stage": request.stage, "job_id": request.job_id, "model": model,
+            "config": config_id, "prompt_version": request.prompt_version,
             "input_tokens": input_tokens, "output_tokens": output_tokens, "cached": cached, "ok": ok,
         }
         if error:  # 실패한 시도만. 오류 종류와 코드뿐이고 메시지는 쓰지 않는다(키·프롬프트가 섞일 수 있다)
@@ -170,6 +174,27 @@ class UsageLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def run_totals(self) -> dict:
+        """이 실행(run_id)의 호출 수·실패 수·캐시 적중 수·토큰. 다른 실행은 더하지 않는다."""
+        totals = {"calls": 0, "failed": 0, "cache_hits": 0, "input_tokens": 0, "output_tokens": 0}
+        if not self.path.exists():
+            return totals
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("run_id") != self.run_id:
+                continue
+            if row.get("cached"):
+                totals["cache_hits"] += 1
+                continue
+            totals["calls"] += 1
+            totals["failed"] += not row.get("ok")
+            totals["input_tokens"] += row.get("input_tokens", 0)
+            totals["output_tokens"] += row.get("output_tokens", 0)
+        return totals
 
     def calls_today(self, model: str) -> int:
         """오늘(태평양 시간) 그 모델로 실제 보낸 호출 수. 캐시 적중은 세지 않고, 실패한 시도는 센다(한도는 시도마다 줄어든다)."""
@@ -189,10 +214,10 @@ class UsageLog:
 
 # ---------------------------------------------------------------- 캐시
 
-def cache_key(model: str, request: LLMRequest) -> str:
-    """모델 ID·프롬프트 버전·단계·프롬프트·스키마의 해시. 키는 파일 이름이 되므로 내용이 노출되지 않는다."""
+def cache_key(model: str, request: LLMRequest, config_id: str = "") -> str:
+    """모델 ID·생성 설정·프롬프트 버전·단계·프롬프트·스키마의 해시. 키는 파일 이름이 되므로 내용이 노출되지 않는다."""
     schema = json.dumps(request.schema.model_json_schema(), sort_keys=True, ensure_ascii=False)
-    blob = json.dumps([model, request.prompt_version, request.stage, request.prompt, schema], ensure_ascii=False)
+    blob = json.dumps([model, config_id, request.prompt_version, request.stage, request.prompt, schema], ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -219,6 +244,10 @@ class CachedClient:
     @property
     def external(self) -> bool:
         return getattr(self.inner, "external", True)  # 모르면 외부로 본다
+
+    @property
+    def config_id(self) -> str:
+        return getattr(self.inner, "config_id", "")
 
     def _disk_dir(self, request: LLMRequest) -> Path | None:
         if not request.contains_profile:
@@ -248,11 +277,11 @@ class CachedClient:
         tmp.replace(directory / f"{key}.json")
 
     def complete_json(self, request: LLMRequest) -> LLMResponse:
-        key = cache_key(self.model, request)
+        key = cache_key(self.model, request, self.config_id)
         hit = self._lookup(request, key)
         if hit is not None:
             if self.usage:
-                self.usage.record(request, model=self.model, cached=True)
+                self.usage.record(request, model=self.model, cached=True, config_id=self.config_id)
             return LLMResponse(data=hit, cached=True, model=self.model)
         response = self.inner.complete_json(request)
         self._store(request, key, response.data)
@@ -367,6 +396,8 @@ class GeminiClient(BaseClient):
     """
 
     external = True
+    # 보내는 생성 설정. temperature·top_p·top_k는 공식 문서가 일부 모델에서 무시한다고 적고 있어 보내지 않는다(기본값). 바꾸면 config_id가 달라진다
+    generation_config = {"response_mime_type": "application/json", "sampling": "default"}
 
     def __init__(self, settings: GeminiSettings, usage: UsageLog | None = None, *,
                  generate: Callable[[LLMRequest], tuple[str, int, int]] | None = None,
@@ -379,6 +410,7 @@ class GeminiClient(BaseClient):
         self._clock = clock
         self._sdk_client = None
         self._last_call: float | None = None
+        self.config_id = hashlib.sha256(json.dumps(self.generation_config, sort_keys=True).encode()).hexdigest()[:8]
         self.min_interval = 60.0 / settings.rpm + 1.0  # 5회면 13초. 한도에 닿아 429를 받는 대신 미리 늦춘다
 
     def remaining_calls(self) -> int:
@@ -409,7 +441,7 @@ class GeminiClient(BaseClient):
             self._sdk_client = genai.Client(
                 api_key=self.settings.api_key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_SECONDS * 1000)  # 밀리초
             )
-        config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=request.schema)
+        config = types.GenerateContentConfig(response_mime_type=self.generation_config["response_mime_type"], response_schema=request.schema)
         r = self._sdk_client.models.generate_content(model=self.model, contents=request.prompt, config=config)
         usage = r.usage_metadata
         out = (getattr(usage, "candidates_token_count", 0) or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
@@ -429,14 +461,14 @@ class GeminiClient(BaseClient):
             except Exception as e:  # noqa: BLE001 - SDK 예외를 모두 감싸 키·원시 오류가 새지 않게 한다
                 if self.usage:
                     code = getattr(e, "code", None)
-                    self.usage.record(request, model=self.model, ok=False,
+                    self.usage.record(request, model=self.model, ok=False, config_id=self.config_id,
                                       error=type(e).__name__ + (f" {code}" if isinstance(code, int) else ""))
                 wait = self._retry_wait(e, attempt, request)
                 attempt += 1
                 self._sleep(wait)
                 continue
             if self.usage:
-                self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out)
+                self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out, config_id=self.config_id)
             return LLMResponse(data=text, input_tokens=tokens_in, output_tokens=tokens_out, model=self.model)  # type: ignore[arg-type]
 
     def _retry_wait(self, e: Exception, attempt: int, request: LLMRequest) -> float:
