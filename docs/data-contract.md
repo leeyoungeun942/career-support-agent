@@ -529,12 +529,12 @@
 | `failure_code` | 3-3의 코드 또는 `null` | `completed`이면 `null`, 아니면 반드시 있다 |
 | `included_in_ranking` | `true` / `false` | **계산값.** `evaluation_status=completed`일 때만 `true` |
 | `rank` | 1부터의 정수 또는 `null` | **계산값.** `ranking`에서의 위치. 정렬에 들어가지 않으면 `null` |
-| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null` |
+| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null`. **`detail`은 비운다**: `detail.items`에 공고 업무 항목 원문이 들어 있어 "공고 원문은 저장하지 않는다"(3-4)와 맞지 않는다 |
 | `eligibility` | `eligibility_result.v1` 또는 `null` | `completed`일 때만 있다 |
-| `reference_only` | `true` / `false` | **계산값.** `eligibility.reference_only`. 화면에 "참고용 평가"를 붙인다 |
+| `reference_only` | `true` / `false` / `null` | **계산값.** `eligibility.reference_only`. 화면에 "참고용 평가"를 붙인다. `eligibility`가 없으면 `null` |
 | `summary` | 문자열 | **계산값.** `completed`이면 `eligibility.summary` (2-7, 코드가 만든 템플릿). 아니면 3-3의 화면 문구. LLM이 쓰지 않는다 |
 
-값끼리의 관계(`core/pipeline.py`의 모델이 검사한다): `included_in_ranking=true`이면 `eligibility`가 있고 `eligibility.gate_ranking_group == gate.ranking_group`이다. `ranking`의 `job_id`는 겹치지 않고, `included_in_ranking=true`인 공고와 1:1이다. `rank`는 `ranking`의 순서와 같다. `counts`는 `jobs`와 맞는다. `jobs`에 같은 `job_id`가 둘 이상 있으면 오류다.
+값끼리의 관계(`core/pipeline_run.py`의 모델이 검사한다. 저장 파일을 다시 읽을 때도 검사한다): `included_in_ranking=true`이면 `eligibility`가 있고 `eligibility.gate_ranking_group == gate.ranking_group`이다. `ranking`의 `job_id`는 겹치지 않고, `included_in_ranking=true`인 공고와 1:1이다. `rank`는 `completed` 공고를 입력 순서대로 `rank_jobs`에 넣은 결과와 같다(다르면 오류). `profile_evidence_included=false`이면 어떤 요건에도 `profile_evidence`가 없다. `counts`는 `jobs`와 맞는다. `jobs`에 같은 `job_id`가 둘 이상 있으면 오류다.
 
 ### 3-3. 평가 상태와 실패 코드
 
