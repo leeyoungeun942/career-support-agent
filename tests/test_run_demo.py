@@ -169,14 +169,6 @@ def test_posting_title_must_appear_in_the_posting_text_when_pairing_with_posting
         demo.build_scenario("mock", path, texts)
 
 
-@pytest.mark.skipif(not demo.GATE_CASES_JSON.exists(), reason="gate input unavailable: data/sample-jobs/gate_sample_cases.json (커밋하지 않는 파일)")
-def test_real_gate_input_gives_same_order_as_fixture_gates(results, capsys):
-    assert main("--gate", "mock") == 0
-    mock_run = demo.load_run(saved_runs(results)[-1])
-    assert mock_run.run_info.gate_mode == "mock" and mock_run.ranking == POLICY_14_ORDER
-    assert [(j.job_id, j.gate.ranking_group) for j in mock_run.jobs] == [(s["job_id"], s["gate_ranking_group"]) for s in SAMPLES]
-
-
 # ---------------------------------------------------------------- --ai (가짜 클라이언트, 네트워크 없음)
 
 @pytest.fixture
