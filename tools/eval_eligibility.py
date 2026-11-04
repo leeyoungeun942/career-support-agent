@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.llm_client import (
@@ -34,7 +35,7 @@ from core.llm_client import (
 )
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import assess_eligibility
-from core.rules import rank_jobs
+from core.rules import ProfileEvidenceError, rank_jobs
 from core.schemas import DISPLAY_LABELS, EligibilityProfile, JobGateResult
 
 REPO = Path(__file__).resolve().parents[1]
@@ -205,7 +206,7 @@ def run_all(samples, profile, gates, postings, extract_client, evidence_client, 
         except LLMStageError:
             row["error"] = "단계 실패(통신 또는 스키마)"
         except ValueError as e:
-            row["error"] = "근거 검증 실패" if "프로필 근거 검증 실패" in str(e) else "결과 조립 실패"
+            row["error"] = "근거 검증 실패" if isinstance(e, ProfileEvidenceError) else "결과 조립 실패"
         rows.append(row)
     return rows, results, stopped
 
@@ -274,15 +275,37 @@ def run_mock(verbose=False):
     return report(rows, results, gates, verbose), rows
 
 
-def run_ai(args):
-    """실제 Gemini 실행. 가상 프로필과 샘플 공고만 보낸다. 호출 전에 설정, 공고 파일, 하루 예산을 모두 점검한다."""
+class AiSetupError(Exception):
+    """실제 AI 실행을 시작할 수 없다. code는 프로세스 종료 코드다. 메시지에는 키나 입력 내용이 없다."""
+
+    def __init__(self, message: str, code: int = 2):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class AiSession:
+    """준비를 마친 실제 AI 실행: 설정, 사용량 기록, 캐시를 거치는 클라이언트, 공고 원문."""
+
+    settings: GeminiSettings
+    usage: UsageLog
+    gemini: GeminiClient
+    client: CachedClient
+    postings: dict[str, str]
+    calls_before: int
+
+
+def prepare_ai(args, job_ids: list[str], results_dir: Path | None = None) -> AiSession:
+    """--ai 실행의 공통 준비: 안내, 동의, 설정, 공고 원문 파일, 하루 호출 예산(공고당 요건 추출 1 + 근거 찾기 1)을 점검한다.
+
+    하나라도 안 되면 아무것도 보내지 않고 AiSetupError를 낸다. 이 도구와 tools.run_demo가 함께 쓴다.
+    """
+    results_dir = Path(results_dir) if results_dir else RESULTS_DIR
     if args.real_profile:
-        print("--real-profile은 구현하지 않았다. 실제 지원자 프로필은 팀의 별도 승인 뒤에도 이 도구로 보내지 않는다 (정책 16장).", file=sys.stderr)
-        return 2
+        raise AiSetupError("--real-profile은 구현하지 않았다. 실제 지원자 프로필은 팀의 별도 승인 뒤에도 이 도구로 보내지 않는다 (정책 16장).")
     print(FREE_TIER_NOTICE)
     if not args.accept_free_tier_terms:
-        print("위 조건에 동의하면 --accept-free-tier-terms를 붙여 다시 실행하라. 아직 아무것도 보내지 않았다.", file=sys.stderr)
-        return 2
+        raise AiSetupError("위 조건에 동의하면 --accept-free-tier-terms를 붙여 다시 실행하라. 아직 아무것도 보내지 않았다.")
     env = load_env()
     for flag, key in (("model", "GEMINI_MODEL"), ("rpm", "GEMINI_RPM"), ("rpd", "GEMINI_RPD")):
         if getattr(args, flag) is not None:
@@ -291,28 +314,33 @@ def run_ai(args):
         settings = GeminiSettings.from_env(env)
         postings = load_postings(Path(args.postings))
     except (LLMConfigError, FileNotFoundError) as e:
-        print(f"실행할 수 없다: {e}", file=sys.stderr)
-        return 2
-    samples, profile, _, gates = load_fixtures()
-    missing = [s["job_id"] for s in samples if s["job_id"] not in postings]
-    if missing:
-        print(f"공고 원문이 없는 표본: {missing}", file=sys.stderr)
-        return 2
-
-    usage = UsageLog(RESULTS_DIR / "llm_usage.jsonl")
+        raise AiSetupError(f"실행할 수 없다: {e}") from None
+    if missing := [i for i in job_ids if i not in postings]:
+        raise AiSetupError(f"공고 원문이 없는 표본: {missing}")
+    usage = UsageLog(results_dir / "llm_usage.jsonl")
     gemini = GeminiClient(settings, usage)
     try:
-        gemini.ensure_budget(2 * len(samples))
+        gemini.ensure_budget(2 * len(job_ids))
     except LLMQuotaExceeded as e:
-        print(f"시작하지 않았다: {e}", file=sys.stderr)
-        return 2
-    before = usage.calls_today(settings.model)
-    extract_dir = RESULTS_DIR / "llm_cache" / (f"run-{usage.run_id}" if args.fresh_cache else "extract")
+        raise AiSetupError(f"시작하지 않았다: {e}") from None
+    extract_dir = results_dir / "llm_cache" / (f"run-{usage.run_id}" if args.fresh_cache else "extract")
     client = CachedClient(gemini, usage=usage, extract_dir=extract_dir,
-                          profile_dir=RESULTS_DIR / "llm_cache" / "profile", cache_profile=args.cache_profile)
+                          profile_dir=results_dir / "llm_cache" / "profile", cache_profile=args.cache_profile)
+    return AiSession(settings, usage, gemini, client, postings, usage.calls_today(settings.model))
+
+
+def run_ai(args):
+    """실제 Gemini 실행. 가상 프로필과 샘플 공고만 보낸다. 호출 전에 설정, 공고 파일, 하루 예산을 모두 점검한다."""
+    samples, profile, _, gates = load_fixtures()
+    try:
+        session = prepare_ai(args, [s["job_id"] for s in samples])
+    except AiSetupError as e:
+        print(e, file=sys.stderr)
+        return e.code
+    settings, usage, gemini, client = session.settings, session.usage, session.gemini, session.client
     print(f"=== 자격요건 평가 샘플 {len(samples)}건 (실제 AI: {settings.model}, 실행 {usage.run_id}, 생성 설정 {gemini.config_id}, "
-          f"오늘 사용 {before}/{settings.rpd}{', 새 캐시' if args.fresh_cache else ''}) ===")
-    rows, results, stopped = run_all(samples, profile, gates, postings, client, client, allow_external_profile=True)
+          f"오늘 사용 {session.calls_before}/{settings.rpd}{', 새 캐시' if args.fresh_cache else ''}) ===")
+    rows, results, stopped = run_all(samples, profile, gates, session.postings, client, client, allow_external_profile=True)
     m = report(rows, results, gates, args.verbose)
     t, after = usage.run_totals(), usage.calls_today(settings.model)
     print(f"이번 실행({usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "

@@ -221,6 +221,30 @@ def test_any_of_requires_item_level_judgements_and_plain_requires_status():
         run([anyof], [{"requirement_id": "R1", "item_results": [{"item_index": 5, "status": "needs_check", "reason_code": "no_profile_info"}]}])
 
 
+def test_any_of_with_item_results_ignores_the_requirement_level_values_added_by_the_model():
+    # 실제 모델이 항목별 결과와 함께 요건 단위 status·사유·근거·질문을 덧붙인 경우 (이슈 #7 실행 기록). 요건 단위 값은 버리고 항목에서 합친다
+    anyof = skill(text="영어가능자, 운전가능자", combine="any_of",
+                  items=[{"index": 0, "text": "영어가능자"}, {"index": 1, "text": "운전가능자"}])
+    items = [{"item_index": 0, "status": "needs_check", "reason_code": "no_profile_info", "question_for_user": "영어가 가능한가요?"},
+             {"item_index": 1, "status": "needs_check", "reason_code": "no_profile_info", "question_for_user": "운전이 가능한가요?"}]
+    added = {"status": "met", "reason_code": "level_unclear", "question_for_user": "요건 단위 질문",
+             "profile_evidence": [{"experience_id": "exp-1", "quote": "프로필에 없는 지어낸 문장"}]}
+    judgements, _ = run([anyof], [{"requirement_id": "R1", "item_results": items, **added}])
+    assert set(judgements["R1"]) == {"item_results"}  # 요건 단위 값은 원시 판정에 넘기지 않는다
+    result = build_result(gate(SAMPLES[0]), profile(), [anyof], judgements)  # 요건 단위의 지어낸 인용 때문에 거부되지 않는다
+    res = result.requirement_results[0]
+    assert (res.status, res.reason_code) == ("needs_check", "no_profile_info")  # 항목이 이긴다 (요건 단위 met이 아니다)
+    assert res.profile_evidence == [] and res.question_for_user is None and [i.status for i in res.item_results] == ["needs_check"] * 2
+
+
+def test_any_of_without_item_results_is_still_a_stage_error_even_with_a_status():
+    anyof = skill(text="영어가능자, 운전가능자", combine="any_of",
+                  items=[{"index": 0, "text": "영어가능자"}, {"index": 1, "text": "운전가능자"}])
+    for bad in ({"requirement_id": "R1"}, {"requirement_id": "R1", "status": "needs_check", "reason_code": "no_profile_info"}):
+        with pytest.raises(LLMStageError, match="항목별"):
+            run([anyof], [bad])
+
+
 def test_any_of_is_judged_per_item_and_merged_by_build_result():
     anyof = skill(text="영어가능자, 운전가능자", combine="any_of",
                   items=[{"index": 0, "text": "영어가능자"}, {"index": 1, "text": "운전가능자"}])
