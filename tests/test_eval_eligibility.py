@@ -3,9 +3,10 @@ import json
 
 import pytest
 
-from core.llm_client import BaseClient, FakeClient, LLMQuotaExceeded, LLMResponse, LLMStageError
+from core.llm_client import FakeClient, LLMQuotaExceeded, LLMStageError
 from core.llm_mock import evidence_answer, extraction_answer, synthetic_posting
 from core.pipeline import assess_eligibility
+from pipeline_helpers import Routing
 from tools import eval_eligibility as tool
 
 SAMPLES, PROFILE, EVIDENCE, GATES = tool.load_fixtures()
@@ -91,26 +92,6 @@ def test_load_postings_reads_job_id_to_text(tmp_path):
     f = tmp_path / "p.json"
     f.write_text(json.dumps({"postings": {"sample-1": {"text": "원문"}}}, ensure_ascii=False), encoding="utf-8")
     assert tool.load_postings(f) == {"sample-1": "원문"}
-
-
-class Routing(BaseClient):
-    """GeminiClient 대신 쓰는 가짜: 단계 이름으로 mock 정답을 골라 돌려주고, 외부 클라이언트인 척한다."""
-
-    external = True
-
-    def __init__(self, settings, usage=None):
-        self.settings, self.model, self.calls = settings, settings.model, []
-        self.answers = {}
-        for s in SAMPLES:
-            self.answers[("extract_requirements", s["job_id"])] = extraction_answer(s)
-            self.answers[("find_evidence", s["job_id"])] = evidence_answer(s, EVIDENCE)
-
-    def ensure_budget(self, needed):
-        Routing.needed = needed
-
-    def _complete(self, request):
-        self.calls.append(request.stage)
-        return LLMResponse(data=self.answers[(request.stage, request.job_id)])
 
 
 @pytest.fixture

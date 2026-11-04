@@ -224,7 +224,7 @@ def _finish(run: PipelineRun, args, posting_ref=lambda job_id: None) -> int:
 
 def run_mock(args) -> int:
     try:
-        jobs, profile, desired, gate_mode = build_scenario(args.gate, args.gate_cases)
+        jobs, profile, desired, _ = build_scenario(args.gate, args.gate_cases)
     except (ScenarioError, FileNotFoundError) as e:
         print(f"실행할 수 없다: {e}", file=sys.stderr)
         return EXIT_REFUSED
@@ -242,7 +242,7 @@ def run_ai(args) -> int:
     try:
         samples, profile, _, _ = ev.load_fixtures()
         session = ev.prepare_ai(args, [s["job_id"] for s in samples], RESULTS_DIR)
-        jobs, profile, desired, gate_mode = build_scenario(args.gate, args.gate_cases, session.postings)
+        jobs, profile, desired, _ = build_scenario(args.gate, args.gate_cases, session.postings)
     except ev.AiSetupError as e:
         print(e, file=sys.stderr)
         return e.code

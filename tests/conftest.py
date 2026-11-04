@@ -38,3 +38,28 @@ def _block_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+@pytest.fixture
+def results(tmp_path, monkeypatch):
+    """tools.run_demo의 결과 폴더(data/results 대신 임시 폴더)."""
+    from tools import run_demo as demo
+
+    monkeypatch.setattr(demo, "RESULTS_DIR", tmp_path / "results")
+    return tmp_path / "results"
+
+
+@pytest.fixture
+def ai_postings(results, tmp_path, monkeypatch):
+    """--ai 실행 준비: 합성 공고 원문 파일, 가짜 설정, 가짜 GeminiClient(Routing). 공고 원문 파일 경로를 돌려준다."""
+    import json
+
+    from core.llm_mock import synthetic_posting
+    from pipeline_helpers import SAMPLES, Routing
+    from tools import eval_eligibility as ev
+
+    postings = tmp_path / "postings.json"
+    postings.write_text(json.dumps({"postings": {s["job_id"]: {"text": synthetic_posting(s)} for s in SAMPLES}}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(ev, "load_env", lambda: {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-test", "GEMINI_RPM": "5", "GEMINI_RPD": "20"})
+    monkeypatch.setattr(ev, "GeminiClient", Routing)
+    return postings

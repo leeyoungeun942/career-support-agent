@@ -7,10 +7,9 @@ from core.llm_client import LLMQuotaExceeded, LLMStageError
 from core.pipeline import run_pipeline
 from core.pipeline_run import ProfileRef, has_profile_evidence
 from core.selection import WARNING_NOTICE, SelectedJob, SelectionRefused, select_job
-from test_pipeline import PROFILE, REF, Wrap, clients, run, scenario
 from tools import eval_eligibility as ev
 from tools import run_demo as demo
-from test_run_demo import Routing, ai_args, ai_env, main, results, saved_runs  # noqa: F401  (픽스처)
+from pipeline_helpers import PROFILE, REF, Routing, Wrap, ai_args, clients, main, run, saved_runs, scenario
 
 
 def quotes_in(selected):
@@ -162,21 +161,21 @@ def test_cli_select_never_overwrites(results):
         demo.save_selection(sel, results / "selection")
 
 
-def test_cli_ai_select_rejects_before_any_call_and_names_the_postings_file(ai_env, results, monkeypatch, capsys):
+def test_cli_ai_select_rejects_before_any_call_and_names_the_postings_file(ai_postings, results, monkeypatch, capsys):
     class NoCall(Routing):
         def _complete(self, request):
             pytest.fail("선택이 틀렸는데 호출했다")
 
     monkeypatch.setattr(ev, "GeminiClient", NoCall)
-    assert main(*ai_args(ai_env, "--select", "nope")) == 2
+    assert main(*ai_args(ai_postings, "--select", "nope")) == 2
     assert not saved_runs(results)
     monkeypatch.setattr(ev, "GeminiClient", Routing)
-    assert main(*ai_args(ai_env, "--select", "sample-3")) == 0
+    assert main(*ai_args(ai_postings, "--select", "sample-3")) == 0
     _, sel = read_selection(results)
     assert sel.posting_ref.endswith("#sample-3") and "postings.json" in sel.posting_ref
 
 
-def test_cli_select_of_a_failed_job_is_refused_but_the_run_is_kept(ai_env, results, monkeypatch, capsys):
+def test_cli_select_of_a_failed_job_is_refused_but_the_run_is_kept(ai_postings, results, monkeypatch, capsys):
     class Flaky(Routing):
         def _complete(self, request):
             if request.job_id == "sample-2" and request.stage == "find_evidence":
@@ -184,6 +183,6 @@ def test_cli_select_of_a_failed_job_is_refused_but_the_run_is_kept(ai_env, resul
             return super()._complete(request)
 
     monkeypatch.setattr(ev, "GeminiClient", Flaky)
-    assert main(*ai_args(ai_env, "--select", "sample-2")) == 2
+    assert main(*ai_args(ai_postings, "--select", "sample-2")) == 2
     assert "선택하지 않았다" in capsys.readouterr().err
     assert len(saved_runs(results)) == 1 and not (results / "selection").exists()

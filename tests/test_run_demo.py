@@ -6,32 +6,13 @@ from pathlib import Path
 import pytest
 
 from core.llm_client import LLMQuotaExceeded, LLMResponse, LLMStageError
-from core.llm_mock import evidence_answer, extraction_answer, synthetic_posting
-from core.pipeline import make_run_id, run_pipeline
+from core.pipeline import run_pipeline
 from core.pipeline_run import ProfileRef
-from test_eval_eligibility import Routing
+from pipeline_helpers import EVIDENCE, POLICY_14_ORDER, PROFILE, SAMPLES, Routing, ai_args, main, saved_runs
 from tools import eval_eligibility as ev
 from tools import run_demo as demo
 
-SAMPLES, PROFILE, EVIDENCE, GATES = ev.load_fixtures()
-POLICY_14_ORDER = ["sample-3", "sample-1", "sample-4", "sample-5", "sample-2", "sample-6"]
 REPO = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture
-def results(tmp_path, monkeypatch):
-    monkeypatch.setattr(demo, "RESULTS_DIR", tmp_path / "results")
-    return tmp_path / "results"
-
-
-def main(*args):
-    with pytest.raises(SystemExit) as e:
-        demo.main(list(args))
-    return e.value.code
-
-
-def saved_runs(results):
-    return sorted((results / "pipeline").glob("*.json"))
 
 
 # ---------------------------------------------------------------- mock 실행
@@ -171,26 +152,13 @@ def test_posting_title_must_appear_in_the_posting_text_when_pairing_with_posting
 
 # ---------------------------------------------------------------- --ai (가짜 클라이언트, 네트워크 없음)
 
-@pytest.fixture
-def ai_env(results, tmp_path, monkeypatch):
-    postings = tmp_path / "postings.json"
-    postings.write_text(json.dumps({"postings": {s["job_id"]: {"text": synthetic_posting(s)} for s in SAMPLES}}, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(ev, "load_env", lambda: {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-test", "GEMINI_RPM": "5", "GEMINI_RPD": "20"})
-    monkeypatch.setattr(ev, "GeminiClient", Routing)
-    return postings
-
-
-def ai_args(postings, *extra):
-    return ["--ai", "--accept-free-tier-terms", "--gate", "injected", "--postings", str(postings), *extra]
-
-
-def test_ai_without_consent_sends_nothing(ai_env, monkeypatch, capsys):
+def test_ai_without_consent_sends_nothing(ai_postings, monkeypatch, capsys):
     monkeypatch.setattr(ev, "GeminiClient", lambda *a, **k: pytest.fail("동의 없이 클라이언트를 만들었다"))
     assert main("--ai", "--gate", "injected") == 2
     assert "--accept-free-tier-terms" in capsys.readouterr().err
 
 
-def test_ai_run_changes_only_eligibility_and_records_run_info(ai_env, results, monkeypatch, capsys):
+def test_ai_run_changes_only_eligibility_and_records_run_info(ai_postings, results, monkeypatch, capsys):
     monkeypatch.setattr(Routing, "config_id", "cfg-test")
 
     class Counting(Routing):  # 실제 GeminiClient처럼 호출마다 사용량을 기록한다
@@ -204,7 +172,7 @@ def test_ai_run_changes_only_eligibility_and_records_run_info(ai_env, results, m
             return LLMResponse(data=data, input_tokens=7, output_tokens=3)
 
     monkeypatch.setattr(ev, "GeminiClient", Counting)
-    assert main(*ai_args(ai_env)) == 0
+    assert main(*ai_args(ai_postings)) == 0
     out = capsys.readouterr().out
     assert "자격요건: AI m-test" in out and "게이트: fixture 결과 사용" in out and Routing.needed == 12
     run = demo.load_run(saved_runs(results)[0])
@@ -217,15 +185,15 @@ def test_ai_run_changes_only_eligibility_and_records_run_info(ai_env, results, m
     assert len(list((results / "llm_cache" / "extract").glob("*.json"))) == 6
 
 
-def test_cache_flags_reach_the_run_info(ai_env, results):
-    main(*ai_args(ai_env, "--fresh-cache"))
-    main(*ai_args(ai_env, "--cache-profile"))
+def test_cache_flags_reach_the_run_info(ai_postings, results):
+    main(*ai_args(ai_postings, "--fresh-cache"))
+    main(*ai_args(ai_postings, "--cache-profile"))
     modes = [demo.load_run(p).run_info.cache_mode for p in saved_runs(results)]
     assert sorted(modes) == ["disk", "fresh"]
     assert len(list((results / "llm_cache" / "profile").glob("*.json"))) == 6
 
 
-def test_ai_run_stops_before_any_call_when_budget_is_short(ai_env, results, monkeypatch, capsys):
+def test_ai_run_stops_before_any_call_when_budget_is_short(ai_postings, results, monkeypatch, capsys):
     class NoBudget(Routing):
         def ensure_budget(self, needed):
             raise LLMQuotaExceeded("오늘 남은 호출 3회, 필요한 호출 12회")
@@ -234,11 +202,11 @@ def test_ai_run_stops_before_any_call_when_budget_is_short(ai_env, results, monk
             pytest.fail("한도가 모자란데 호출했다")
 
     monkeypatch.setattr(ev, "GeminiClient", NoBudget)
-    assert main(*ai_args(ai_env)) == 2
+    assert main(*ai_args(ai_postings)) == 2
     assert "시작하지 않았다" in capsys.readouterr().err and not saved_runs(results)
 
 
-def test_ai_stage_failure_keeps_the_other_jobs_and_exits_1(ai_env, results, monkeypatch, capsys):
+def test_ai_stage_failure_keeps_the_other_jobs_and_exits_1(ai_postings, results, monkeypatch, capsys):
     class Flaky(Routing):
         def _complete(self, request):
             if request.job_id == "sample-2" and request.stage == "find_evidence":
@@ -246,14 +214,14 @@ def test_ai_stage_failure_keeps_the_other_jobs_and_exits_1(ai_env, results, monk
             return super()._complete(request)
 
     monkeypatch.setattr(ev, "GeminiClient", Flaky)
-    assert main(*ai_args(ai_env)) == 1
+    assert main(*ai_args(ai_postings)) == 1
     cap = capsys.readouterr()
     assert "평가하지 못한 공고" in cap.out and "평가 실패: AI 단계 오류" in cap.out and "SECRET-DETAIL" not in cap.out + cap.err
     run = demo.load_run(saved_runs(results)[0])
     assert run.counts == {"completed": 5, "failed": 1, "not_run": 0}
 
 
-def test_ai_quota_exhaustion_marks_not_run_saves_and_exits_3(ai_env, results, monkeypatch, capsys):
+def test_ai_quota_exhaustion_marks_not_run_saves_and_exits_3(ai_postings, results, monkeypatch, capsys):
     class Quota(Routing):
         def _complete(self, request):
             if request.job_id == "sample-3":
@@ -261,13 +229,13 @@ def test_ai_quota_exhaustion_marks_not_run_saves_and_exits_3(ai_env, results, mo
             return super()._complete(request)
 
     monkeypatch.setattr(ev, "GeminiClient", Quota)
-    assert main(*ai_args(ai_env)) == 3
+    assert main(*ai_args(ai_postings)) == 3
     cap = capsys.readouterr()
     assert "평가 안 함: 호출 한도 소진" in cap.out and "SECRET-DETAIL" not in cap.out + cap.err and "태평양" in cap.err
     run = demo.load_run(saved_runs(results)[0])
     assert run.counts == {"completed": 2, "failed": 1, "not_run": 3} and run.ranking == ["sample-1", "sample-2"]
 
 
-def test_ai_run_with_missing_postings_file_gives_guidance(ai_env, tmp_path, capsys):
+def test_ai_run_with_missing_postings_file_gives_guidance(ai_postings, tmp_path, capsys):
     assert main("--ai", "--accept-free-tier-terms", "--gate", "injected", "--postings", str(tmp_path / "none.json")) == 2
     assert "공고 원문 파일이 없다" in capsys.readouterr().err
