@@ -2,12 +2,28 @@
   "_comment": "가상 프로필. 실제 지원자 정보 금지. 요건 문장은 공고 원문이 아니라 docs/policies/eligibility.md 17장의 요건 요약이다.",
   "as_of_month": "2026-11",
   "profile": {
-    "education": [{"degree": "bachelor", "majors": ["영어영문학"], "status": "graduated", "graduation_month": "2026-02"}],
+    "education": [{"degree": "bachelor", "majors": ["영어영문학"], "status": "graduated", "graduation_month": "2026-02",
+                   "raw": "OO대학교 영어영문학과 졸업 (2026.02)"}],
     "experiences": [
       {"id": "exp-1", "title": "B2B AI 사업부 기획팀 인턴", "type": "intern", "category": "JF_SERVICE_PLANNING",
-       "period": {"start": "2025-07", "end": "2025-12"}}
+       "period": {"start": "2025-07", "end": "2025-12"}, "role": "서비스 기획 보조",
+       "actions": ["B2B AI 챗봇 서비스 알파 버전 QA 및 서비스 기획 보조",
+                   "사내 규정 Q&A AI 서비스의 오응답(할루시네이션) 패턴 수집 및 정리",
+                   "사용자 테스트 진행 후 불만족 응답 사례 분류 (약 200건 분석)",
+                   "개발팀 전달용 기초 프롬프트 수정안 및 화면 와이어프레임(Figma) 작성 보조"],
+       "tools": ["Figma"]},
+      {"id": "exp-2", "title": "[B2B] 사내 규정 안내 AI 챗봇 시나리오 개선 (인턴 팀 프로젝트)", "type": "project", "category": "JF_SERVICE_PLANNING",
+       "period": {"start": "2025-07", "end": "2025-12"},
+       "actions": ["기존 챗봇의 답변 정확도를 높이기 위한 시나리오 및 예외 처리 가이드 작성",
+                   "사수 PM의 지시에 따라 사내 규정 문서(PDF) 텍스트 데이터 정제 작업 보조",
+                   "AI가 답변을 못 할 때(Fail) 나타날 안내 문구 및 재질문 유도 UI 작성",
+                   "인도 개발진과 전달할 문서의 기초 영문 번역 및 기능 체크리스트 작성"]},
+      {"id": "exp-3", "title": "[개인/Side] AI 챗봇 UI/UX 모니터링 및 시나리오 스터디", "type": "project", "category": "JF_SERVICE_PLANNING",
+       "period": {"start": "2025-09", "end": "2025-10"},
+       "actions": ["주요 AI 에이전트 서비스(ChatGPT, Claude 등)의 답변 생성 화면(타이핑 효과, 로딩바) 비교 분석",
+                   "사용자 입장에서 응답 대기 시간이 길어질 때의 이탈 지점 분석 및 보고서 작성"]}
     ],
-    "skills": ["Figma", "Notion", "Excel", "SQL 기초"],
+    "skills": ["Figma", "Notion", "Excel", "SQL 기초", "ChatGPT/Claude 사용 경험", "프롬프트 작성 기초", "RAG 개념 이해"],
     "certificates": ["ADsP", "TOEIC Speaking IH"]
   },
   "samples": [

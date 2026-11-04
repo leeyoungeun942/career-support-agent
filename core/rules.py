@@ -131,6 +131,14 @@ def _injected_result(req: JobRequirement, given: RequirementResult | dict) -> Re
     return RequirementResult(**raw)
 
 
+def injected_result(req: JobRequirement, given: RequirementResult | dict) -> RequirementResult:
+    """밖에서 받은 skill·qualitative 판정 1개를 build_result와 같은 절차(되돌림 -> 검증 -> any_of 합치기)로 결과 객체로 만든다.
+
+    LLM 호출 쪽이 계약을 어기는 응답을 미리 걸러 낼 때 쓴다. 근거 대조(check_profile_evidence)는 하지 않는다.
+    """
+    return _injected_result(req, given)
+
+
 def build_result(
     gate: JobGateResult,
     profile: EligibilityProfile,
