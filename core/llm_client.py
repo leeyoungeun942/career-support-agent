@@ -1,15 +1,444 @@
-"""LLM 호출 모듈 자리 (이슈 #6). 아직 구현하지 않았다.
+"""LLM 호출 모듈 (이슈 #6, 정책 eligibility.md 13-1, 16장).
 
-- 호출, 재시도, 응답을 스키마로 검증하는 일은 이 모듈에서만 한다 (project-guide 3-2 "LLM 호출 모듈을 분리").
+- 호출, 재시도, 캐시, 사용량 기록, 응답을 스키마로 검증하는 일은 이 모듈에서만 한다 (project-guide 3-2 "LLM 호출 모듈을 분리").
 - core/rules.py는 이 모듈을 가져오지 않는다. 점수 계산, 판정 형식 변환, 순위 정렬은 코드가 한다 (AGENTS.md).
-- 기본은 mock이다. 실제 호출은 --ai 옵션과 외부 API 사용 승인 뒤에만 한다 (project-guide 3-2).
-- 응답이 스키마를 어기면 오류로 처리하고 extraction_issues에 extraction_failed로 남긴다 (정책 1-4).
+- 기본은 mock이다. 실제 호출(GeminiClient)은 --ai 옵션과 외부 API 사용 승인 뒤에만 한다 (project-guide 3-2).
+- 응답이 스키마를 어기면 다시 묻지 않고 LLMStageError로 처리한다. 원시 오류와 모델 출력은 예외 메시지에 넣지 않는다 (정책 13-1).
+- `google-genai`는 GeminiClient가 호출할 때만 가져온다. SDK가 없어도 이 모듈은 import된다.
+- API 키는 예외·로그·캐시·사용량 기록에 쓰지 않는다 (정책 16장).
 """
-from typing import Protocol
+import hashlib
+import json
+import os
+import re
+import time
+import warnings
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol
+from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel, ValidationError
+
+PACIFIC = ZoneInfo("America/Los_Angeles")  # 무료 티어 일일 한도(RPD)는 태평양 시간 자정에 초기화된다
+USAGE_LOG_PATH = Path("data/results/llm_usage.jsonl")
+EXTRACT_CACHE_DIR = Path("data/results/llm_cache/extract")
+PROFILE_CACHE_DIR = Path("data/results/llm_cache/profile")
+
+DEFAULT_RPM = 5   # 알려진 가장 작은 무료 한도. 실행 때 AI Studio 화면 값으로 GEMINI_RPM을 맞춘다 (정책 18장)
+DEFAULT_RPD = 20
+MAX_RETRIES = 3
+BACKOFF_BASE_SECONDS = 2.0
+MAX_WAIT_SECONDS = 60.0
+
+
+class LLMError(Exception):
+    """이 모듈이 내는 오류의 뿌리. 메시지에 키·프롬프트·모델 출력 원문을 넣지 않는다."""
+
+
+class LLMStageError(LLMError):
+    """단계 실패: 통신 실패, 재시도 소진, 응답이 스키마를 어김. 사용자에게는 정책 1-4의 안내 문구만 보인다."""
+
+
+class LLMQuotaExceeded(LLMError):
+    """일일 한도(RPD)나 프로젝트 quota 소진. 재시도하지 않고 멈춘다 (결제로 넘어가지 않는다, 규칙 04)."""
+
+
+class LLMConfigError(LLMError):
+    """키나 모델 ID가 없는 등 설정 문제. 호출하지 않는다."""
+
+
+@dataclass(frozen=True)
+class LLMRequest:
+    stage: str                    # "extract_requirements" / "find_evidence"
+    prompt: str
+    schema: type[BaseModel]       # 응답 스키마(평탄한 Pydantic 클래스)
+    job_id: str = ""
+    prompt_version: str = "0"     # 프롬프트 파일 맨 위 version. 캐시 키에 들어간다
+    contains_profile: bool = False  # 프로필이 든 요청은 기본으로 디스크 캐시에 남기지 않는다 (정책 16장)
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    data: dict
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached: bool = False
+    model: str = ""
 
 
 class LLMClient(Protocol):
-    """요건 추출과 근거 찾기가 쓰는 호출 창구. 메서드 형태는 이슈 #6에서 확정한다."""
+    """요건 추출과 근거 찾기가 쓰는 호출 창구."""
 
-    def complete_json(self, prompt: str) -> dict:
+    model: str
+
+    def complete_json(self, request: LLMRequest) -> LLMResponse:
         ...
+
+
+def validate_data(request: LLMRequest, payload: Any) -> dict:
+    """payload(dict 또는 JSON 문자열)를 요청의 스키마로 검증한다. 어기면 LLMStageError.
+
+    메시지에는 어긴 위치와 종류만 적고 입력 값은 적지 않는다(모델 출력·프로필이 새지 않게).
+    """
+    try:
+        if isinstance(payload, (str, bytes)):
+            payload = json.loads(payload)
+        return request.schema.model_validate(payload).model_dump(mode="json")
+    except json.JSONDecodeError:
+        raise LLMStageError(f"{request.stage}({request.job_id}): 응답이 JSON이 아니다") from None
+    except ValidationError as e:
+        where = "; ".join(f"{'.'.join(str(p) for p in err['loc'])}:{err['type']}" for err in e.errors()[:5])
+        raise LLMStageError(f"{request.stage}({request.job_id}): 응답이 스키마를 어겼다 ({where})") from None
+
+
+class BaseClient:
+    """공통 뼈대: 구현체는 _complete만 만들고, 응답 검증은 여기서 한 번 한다."""
+
+    model = ""
+
+    def complete_json(self, request: LLMRequest) -> LLMResponse:
+        raw = self._complete(request)
+        return LLMResponse(
+            data=validate_data(request, raw.data), input_tokens=raw.input_tokens,
+            output_tokens=raw.output_tokens, cached=False, model=self.model,
+        )
+
+    def _complete(self, request: LLMRequest) -> LLMResponse:
+        raise NotImplementedError
+
+
+class FakeClient(BaseClient):
+    """테스트용. 대본(응답 dict 또는 던질 예외)을 순서대로 낸다. 받은 요청은 requests에 쌓는다."""
+
+    def __init__(self, script: list[Any], model: str = "fake-model"):
+        self.script = list(script)
+        self.model = model
+        self.requests: list[LLMRequest] = []
+
+    def _complete(self, request: LLMRequest) -> LLMResponse:
+        self.requests.append(request)
+        if not self.script:
+            raise AssertionError("FakeClient 대본이 바닥났다")
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return LLMResponse(data=item, input_tokens=10, output_tokens=5)
+
+
+class MockClient(BaseClient):
+    """fixture의 정답을 돌려준다. (stage, job_id)마다 응답 dict를 미리 받아 둔다. 네트워크를 쓰지 않는다."""
+
+    model = "mock"
+
+    def __init__(self, answers: Mapping[tuple[str, str], dict]):
+        self.answers = dict(answers)
+
+    def _complete(self, request: LLMRequest) -> LLMResponse:
+        try:
+            return LLMResponse(data=self.answers[(request.stage, request.job_id)])
+        except KeyError:
+            raise LLMStageError(f"mock에 정답이 없다: {request.stage}({request.job_id})") from None
+
+
+# ---------------------------------------------------------------- 사용량 기록
+
+class UsageLog:
+    """호출 수·토큰·캐시 적중·모델 ID만 남긴다. 프롬프트와 응답 내용은 쓰지 않는다 (규칙 03, 정책 16장)."""
+
+    def __init__(self, path: Path = USAGE_LOG_PATH, now: Callable[[], datetime] | None = None):
+        self.path = Path(path)
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def pacific_date(self) -> str:
+        return self._now().astimezone(PACIFIC).date().isoformat()
+
+    def record(self, request: LLMRequest, *, model: str, input_tokens: int = 0, output_tokens: int = 0,
+               cached: bool = False, ok: bool = True) -> None:
+        row = {
+            "ts": self._now().astimezone(timezone.utc).isoformat(timespec="seconds"),
+            "date_pt": self.pacific_date(), "stage": request.stage, "job_id": request.job_id, "model": model,
+            "input_tokens": input_tokens, "output_tokens": output_tokens, "cached": cached, "ok": ok,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    def calls_today(self, model: str) -> int:
+        """오늘(태평양 시간) 그 모델로 실제 보낸 호출 수. 캐시 적중은 세지 않고, 실패한 시도는 센다(한도는 시도마다 줄어든다)."""
+        if not self.path.exists():
+            return 0
+        today = self.pacific_date()
+        count = 0
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("date_pt") == today and row.get("model") == model and not row.get("cached"):
+                count += 1
+        return count
+
+
+# ---------------------------------------------------------------- 캐시
+
+def cache_key(model: str, request: LLMRequest) -> str:
+    """모델 ID·프롬프트 버전·단계·프롬프트·스키마의 해시. 키는 파일 이름이 되므로 내용이 노출되지 않는다."""
+    schema = json.dumps(request.schema.model_json_schema(), sort_keys=True, ensure_ascii=False)
+    blob = json.dumps([model, request.prompt_version, request.stage, request.prompt, schema], ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+class CachedClient:
+    """어떤 클라이언트든 감싸서 캐시와 사용량 기록을 더한다.
+
+    공고만 든 요청(요건 추출)은 디스크(extract_dir)와 메모리에 캐시한다.
+    프로필이 든 요청(근거 찾기)은 기본으로 메모리에만 두고, cache_profile=True일 때만 profile_dir에도 쓴다 (정책 16장).
+    """
+
+    def __init__(self, inner: LLMClient, *, usage: UsageLog | None = None, extract_dir: Path = EXTRACT_CACHE_DIR,
+                 profile_dir: Path = PROFILE_CACHE_DIR, cache_profile: bool = False):
+        self.inner = inner
+        self.usage = usage
+        self.extract_dir = Path(extract_dir)
+        self.profile_dir = Path(profile_dir)
+        self.cache_profile = cache_profile
+        self._memory: dict[str, dict] = {}
+
+    @property
+    def model(self) -> str:
+        return self.inner.model
+
+    def _disk_dir(self, request: LLMRequest) -> Path | None:
+        if not request.contains_profile:
+            return self.extract_dir
+        return self.profile_dir if self.cache_profile else None
+
+    def _lookup(self, request: LLMRequest, key: str) -> dict | None:
+        if key in self._memory:
+            return self._memory[key]
+        directory = self._disk_dir(request)
+        if directory is None or not (directory / f"{key}.json").exists():
+            return None
+        try:
+            data = json.loads((directory / f"{key}.json").read_text(encoding="utf-8"))
+            return validate_data(request, data)
+        except (OSError, json.JSONDecodeError, LLMStageError):
+            return None  # 깨진 캐시는 없는 것으로 본다
+
+    def _store(self, request: LLMRequest, key: str, data: dict) -> None:
+        self._memory[key] = data
+        directory = self._disk_dir(request)
+        if directory is None:
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / f"{key}.json.tmp"
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(directory / f"{key}.json")
+
+    def complete_json(self, request: LLMRequest) -> LLMResponse:
+        key = cache_key(self.model, request)
+        hit = self._lookup(request, key)
+        if hit is not None:
+            if self.usage:
+                self.usage.record(request, model=self.model, cached=True)
+            return LLMResponse(data=hit, cached=True, model=self.model)
+        response = self.inner.complete_json(request)
+        self._store(request, key, response.data)
+        return response
+
+
+# ---------------------------------------------------------------- Gemini
+
+@dataclass(frozen=True)
+class GeminiSettings:
+    api_key: str = ""
+    model: str = ""
+    rpm: int = DEFAULT_RPM
+    rpd: int = DEFAULT_RPD
+
+    def __repr__(self) -> str:  # 키가 로그에 나가지 않게
+        return f"GeminiSettings(model={self.model!r}, rpm={self.rpm}, rpd={self.rpd}, api_key=<{'set' if self.api_key else 'unset'}>)"
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> "GeminiSettings":
+        """GEMINI_API_KEY만 읽는다. GOOGLE_API_KEY가 있으면 SDK가 우선할 수 있어 경고한다 (정책 16장, 플랜 D12)."""
+        if env.get("GOOGLE_API_KEY"):
+            warnings.warn(
+                "GOOGLE_API_KEY가 환경에 있다. 이 프로젝트는 GEMINI_API_KEY만 쓴다. "
+                "결제가 연결됐을 수 있는 다른 키이면 지우거나 확인하라.", stacklevel=2,
+            )
+        key = (env.get("GEMINI_API_KEY") or "").strip()
+        model = (env.get("GEMINI_MODEL") or "").strip()
+        if not key:
+            raise LLMConfigError("GEMINI_API_KEY가 없다. .env.example을 .env로 복사하고 AI Studio에서 받은 키를 넣어라")
+        if not model:
+            raise LLMConfigError("GEMINI_MODEL이 없다. 정확한 모델 ID를 .env에 적어라(latest·preview 별칭 금지)")
+        try:
+            rpm = int(env.get("GEMINI_RPM") or DEFAULT_RPM)
+            rpd = int(env.get("GEMINI_RPD") or DEFAULT_RPD)
+        except ValueError:
+            raise LLMConfigError("GEMINI_RPM, GEMINI_RPD는 정수여야 한다") from None
+        if rpm < 1 or rpd < 1:
+            raise LLMConfigError("GEMINI_RPM, GEMINI_RPD는 1 이상이어야 한다")
+        return cls(api_key=key, model=model, rpm=rpm, rpd=rpd)
+
+
+def read_env_file(path: Path = Path(".env")) -> dict[str, str]:
+    """`KEY=VALUE` 줄만 읽는 최소 파서. 주석과 빈 줄은 건너뛴다. 값은 출력하지 않는다."""
+    values: dict[str, str] = {}
+    if not Path(path).exists():
+        return values
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        values[name.strip()] = value.split(" #")[0].strip().strip("\"'")
+    return values
+
+
+def load_env(path: Path = Path(".env")) -> dict[str, str]:
+    """`.env` 값에 프로세스 환경변수를 덮어 쓴다(환경변수가 우선)."""
+    return {**read_env_file(path), **os.environ}
+
+
+def _redact(text: str, secret: str) -> str:
+    return text.replace(secret, "<KEY>") if secret else text
+
+
+def _retry_delay(details: Any) -> float | None:
+    """서버가 알려 주는 대기 시간(RetryInfo.retryDelay, 예: "13s")."""
+    for item in _error_items(details):
+        delay = item.get("retryDelay")
+        if isinstance(delay, str):
+            m = re.fullmatch(r"(\d+(?:\.\d+)?)s", delay)
+            if m:
+                return float(m.group(1))
+    return None
+
+
+def _error_items(details: Any) -> list[dict]:
+    if not isinstance(details, Mapping):
+        return []
+    err = details.get("error", details)
+    items = err.get("details") if isinstance(err, Mapping) else None
+    return [i for i in items if isinstance(i, Mapping)] if isinstance(items, list) else []
+
+
+def classify_429(details: Any) -> str:
+    """429를 'transient'(분당 제한)와 'quota'(일일 한도·프로젝트 quota·구별 불가)로 가른다.
+
+    QuotaFailure.violations의 quotaId에 PerMinute가 있고 PerDay가 없으면 일시적이다. 그 밖에는 모두 quota로 보고 멈춘다 (정책 13-1).
+    """
+    ids = []
+    for item in _error_items(details):
+        for v in item.get("violations", []) or []:
+            if isinstance(v, Mapping):
+                ids.append(f"{v.get('quotaId', '')} {v.get('quotaMetric', '')}".lower())
+    if not ids or any("perday" in i or "per_day" in i or "daily" in i for i in ids):
+        return "quota"
+    return "transient" if any("perminute" in i or "per_minute" in i for i in ids) else "quota"
+
+
+def _is_network_error(e: BaseException) -> bool:
+    if isinstance(e, (OSError, TimeoutError)):
+        return True
+    return type(e).__module__.split(".")[0] in ("httpx", "httpx2", "httpcore", "requests")
+
+
+class GeminiClient(BaseClient):
+    """Gemini Developer API 무료 티어. 자동 fallback은 없다 (정책 13-1).
+
+    - 키는 설정에서 SDK에 명시적으로 넘긴다. 호출 사이에 최소 간격을 두고, 오늘 호출 수가 GEMINI_RPD에 닿으면 호출하지 않는다.
+    - 일시 오류(5xx, 네트워크, 분당 제한 429)만 지수 대기로 MAX_RETRIES회 재시도한다. 일일 한도 429는 LLMQuotaExceeded.
+    - generate, sleep, clock은 테스트에서 바꿔 끼운다.
+    """
+
+    def __init__(self, settings: GeminiSettings, usage: UsageLog | None = None, *,
+                 generate: Callable[[LLMRequest], tuple[str, int, int]] | None = None,
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
+        self.settings = settings
+        self.model = settings.model
+        self.usage = usage
+        self._generate = generate or self._sdk_generate
+        self._sleep = sleep
+        self._clock = clock
+        self._sdk_client = None
+        self._last_call: float | None = None
+        self.min_interval = 60.0 / settings.rpm + 1.0  # 5회면 13초. 한도에 닿아 429를 받는 대신 미리 늦춘다
+
+    def remaining_calls(self) -> int:
+        used = self.usage.calls_today(self.model) if self.usage else 0
+        return max(self.settings.rpd - used, 0)
+
+    def ensure_budget(self, needed_calls: int) -> None:
+        """실행에 필요한 호출 수가 오늘 남은 한도를 넘으면 시작하기 전에 멈춘다 (D13)."""
+        left = self.remaining_calls()
+        if needed_calls > left:
+            raise LLMQuotaExceeded(
+                f"{self.model}: 오늘 남은 호출 {left}회, 필요한 호출 {needed_calls}회. "
+                f"태평양 시간 자정(한국 시간 오후 5시경) 이후에 다시 하거나 다른 모델로 돌려라"
+            )
+
+    def _wait_for_interval(self) -> None:
+        if self._last_call is not None:
+            wait = self.min_interval - (self._clock() - self._last_call)
+            if wait > 0:
+                self._sleep(wait)
+        self._last_call = self._clock()
+
+    def _sdk_generate(self, request: LLMRequest) -> tuple[str, int, int]:
+        from google import genai  # 호출 시점에만 가져온다
+        from google.genai import types
+
+        if self._sdk_client is None:
+            self._sdk_client = genai.Client(api_key=self.settings.api_key)
+        config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=request.schema)
+        r = self._sdk_client.models.generate_content(model=self.model, contents=request.prompt, config=config)
+        usage = r.usage_metadata
+        out = (getattr(usage, "candidates_token_count", 0) or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
+        return r.text or "", getattr(usage, "prompt_token_count", 0) or 0, out
+
+    def _fail(self, request: LLMRequest, what: str) -> LLMStageError:
+        return LLMStageError(f"{request.stage}({request.job_id}): {what}")
+
+    def _complete(self, request: LLMRequest) -> LLMResponse:
+        attempt = 0
+        while True:
+            if self.remaining_calls() <= 0:
+                raise LLMQuotaExceeded(f"{self.model}: 오늘 호출 한도(GEMINI_RPD={self.settings.rpd})에 닿았다")
+            self._wait_for_interval()
+            try:
+                text, tokens_in, tokens_out = self._generate(request)
+            except Exception as e:  # noqa: BLE001 - SDK 예외를 모두 감싸 키·원시 오류가 새지 않게 한다
+                if self.usage:
+                    self.usage.record(request, model=self.model, ok=False)
+                wait = self._retry_wait(e, attempt, request)
+                attempt += 1
+                self._sleep(wait)
+                continue
+            if self.usage:
+                self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out)
+            return LLMResponse(data=text, input_tokens=tokens_in, output_tokens=tokens_out, model=self.model)  # type: ignore[arg-type]
+
+    def _retry_wait(self, e: Exception, attempt: int, request: LLMRequest) -> float:
+        """재시도할 오류면 대기 시간을, 아니면 예외를 낸다."""
+        code = getattr(e, "code", None)
+        details = getattr(e, "details", None)
+        secret = self.settings.api_key
+        label = f"{type(e).__name__}" + (f" {code}" if isinstance(code, int) else "")
+        if code == 429:
+            if classify_429(details) == "quota":
+                raise LLMQuotaExceeded(f"{self.model}: 일일 한도나 quota 소진으로 보인다(429). 재시도하지 않는다") from None
+        elif isinstance(code, int) and code < 500:
+            raise self._fail(request, _redact(f"요청이 거부됐다 ({label})", secret)) from None
+        elif not (isinstance(code, int) or _is_network_error(e)):
+            raise self._fail(request, _redact(f"호출 중 알 수 없는 오류 ({label})", secret)) from None
+        if attempt >= MAX_RETRIES:
+            raise self._fail(request, _redact(f"재시도 {MAX_RETRIES}회 후에도 실패 ({label})", secret)) from None
+        server_delay = _retry_delay(details)
+        wait = server_delay if server_delay is not None else BACKOFF_BASE_SECONDS * 2 ** attempt
+        return min(wait, MAX_WAIT_SECONDS)

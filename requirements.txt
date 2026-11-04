@@ -1,4 +1,5 @@
-anthropic
+google-genai
+tzdata
 pydantic>=2
 python-dotenv
 pytest
