@@ -516,7 +516,7 @@
 | `model_id` | 문자열 또는 `null` | `ai`일 때 정확한 모델 ID |
 | `prompt_versions` | `{extract_requirements, find_evidence}` | 프롬프트 파일 맨 위의 `version` |
 | `generation_config` | 문자열 또는 `null` | 생성 설정 식별자 (`GeminiClient.config_id`) |
-| `cache_mode` | `memory` / `disk` / `fresh` | `fresh`는 이번 실행만의 공고 추출 캐시 (정책 18장 모델 비교 조건) |
+| `cache_mode` | `memory` / `disk` / `fresh` | `memory`: 기본(공고 추출은 공용 디스크 캐시, 프로필이 든 근거 찾기는 메모리). `disk`: `--cache-profile`로 근거 찾기 결과도 디스크에 둠. `fresh`: `--fresh-cache`로 이번 실행만의 새 공고 추출 캐시를 씀 (정책 18장 모델 비교 조건) |
 | `cache_hits`, `input_tokens`, `output_tokens` | 정수 | 사용량 기록의 이번 실행 합계. 프롬프트·응답 내용은 넣지 않는다 |
 
 ### 3-2. 공고별 항목 `jobs[]`

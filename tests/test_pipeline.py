@@ -189,6 +189,13 @@ def test_gate_runs_with_mock_ai_and_keeps_no_detail():
     assert job.evaluation_status == "completed" and job.eligibility.gate_ranking_group == "primary"
 
 
+def test_per_job_gate_judge_overrides_the_shared_one():
+    job = ScenarioJob(job_id="g-1", posting_text=synthetic_posting(G_SAMPLE), gate_posting=POSTING, gate_judge=SERVICE_JUDGE)
+    mock_e, mock_j = clients([G_SAMPLE])
+    r = run_pipeline([job], PROFILE, REF, mock_e, mock_j, desired_family="JF_SERVICE_PLANNING", now=NOW)  # 공용 gate_judge 없음
+    assert r.jobs[0].gate.result == "match"
+
+
 def test_malformed_gate_input_is_input_invalid_for_that_job_only():
     bad = gate_job("g-0", {"job_title": "x", "position": "y", "items": [], "category": "z"})
     r = run_gate([bad, gate_job("g-1")])
@@ -203,7 +210,9 @@ def test_invalid_scenario_is_refused_instead_of_recorded_per_job():
     with pytest.raises(ValueError, match="섞을 수 없다"):
         run(jobs=[jobs[0], gate_job("g-1")], desired_family="JF_SERVICE_PLANNING", gate_judge=SERVICE_JUDGE)
     with pytest.raises(ValueError, match="gate_judge"):
-        run(jobs=[gate_job()])
+        run(jobs=[gate_job()], desired_family="JF_SERVICE_PLANNING")
+    with pytest.raises(ValueError, match="desired_family"):
+        run(jobs=[gate_job()], gate_judge=SERVICE_JUDGE)
     with pytest.raises(ValueError, match="job_id"):
         run(jobs=[ScenarioJob(job_id="sample-1", posting_text="x", gate=GATES["sample-2"])])
     with pytest.raises(ValueError, match="모델이 다르다"):

@@ -48,6 +48,7 @@ class ScenarioJob:
     job_label: str | None = None
     gate: JobGateResult | None = None
     gate_posting: dict | None = None  # {"job_title", "position", "items"} (core.job_gate.judge의 입력)
+    gate_judge: AiJudge | None = None  # 이 공고의 게이트 AI 자리. 없으면 run_pipeline의 gate_judge (mock은 공고마다 정답 라벨이 달라 필요하다)
 
 
 def make_run_id(now: datetime | None = None) -> str:
@@ -94,8 +95,10 @@ def run_pipeline(
     for job in jobs:
         if job.gate is not None and job.gate.job_id != job.job_id:
             raise ValueError(f"공고 {job.job_id}: 주입한 게이트 결과의 job_id가 {job.gate.job_id!r}이다")
-    if not all(injected) and (gate_judge is None or desired_family is None):
-        raise ValueError("게이트를 실행하려면 gate_judge와 desired_family가 필요하다")
+    if desired_family is None and not all(injected):
+        raise ValueError("게이트를 실행하려면 desired_family가 필요하다")
+    if lacking := [j.job_id for j in jobs if j.gate is None and (j.gate_judge or gate_judge) is None]:
+        raise ValueError(f"게이트를 실행하려면 gate_judge가 필요하다: {lacking}")
 
     gates: dict[str, JobGateResult | None] = {}
     dic = None if all(injected) else Dictionary()
@@ -104,7 +107,7 @@ def run_pipeline(
             gates[job.job_id] = job.gate
             continue
         try:
-            gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, gate_judge, dic, with_detail=False)
+            gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
         except (ValueError, KeyError, TypeError):  # 게이트 입력이 없거나 형식이 틀림. 메시지는 입력 값을 담을 수 있어 옮기지 않는다
             gates[job.job_id] = None
 
