@@ -32,6 +32,7 @@ DEFAULT_RPD = 20
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 2.0
 MAX_WAIT_SECONDS = 60.0
+REQUEST_TIMEOUT_SECONDS = 120  # 응답이 멎은 호출을 끊는다. 시간 초과는 네트워크 오류로 보고 재시도한다
 
 
 class LLMError(Exception):
@@ -405,7 +406,9 @@ class GeminiClient(BaseClient):
         from google.genai import types
 
         if self._sdk_client is None:
-            self._sdk_client = genai.Client(api_key=self.settings.api_key)
+            self._sdk_client = genai.Client(
+                api_key=self.settings.api_key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_SECONDS * 1000)  # 밀리초
+            )
         config = types.GenerateContentConfig(response_mime_type="application/json", response_schema=request.schema)
         r = self._sdk_client.models.generate_content(model=self.model, contents=request.prompt, config=config)
         usage = r.usage_metadata

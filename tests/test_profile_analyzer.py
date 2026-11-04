@@ -12,7 +12,6 @@ from core.llm_client import (
     GeminiSettings,
     LLMQuotaExceeded,
     LLMStageError,
-    UsageLog,
 )
 from core.llm_mock import evidence_answer, make_evidence_mock
 from core.rules import build_result

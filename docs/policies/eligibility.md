@@ -501,7 +501,7 @@ LLM은 두 곳에서만 쓴다. 두 곳 모두 응답을 **구조화 출력**(�
 
 | 모델이 내는 칸 | 코드가 확인하는 것 |
 |---|---|
-| 요건 목록: `level`, `type`, `text`, `combine`, `items`, `numeric_kind`, `min_value`, `max_value`, `career_family`, `career_family_basis`, `min_degree`, `allows_graduating`, `major_names` | `text`는 공고 원문의 일부여야 한다. `items`의 `text`는 요건 `text`의 일부여야 한다. `JobRequirement` 검증(data-contract 2-0)을 통과해야 한다 |
+| 요건 목록: `level`, `type`, `text`, `combine`, `items`, `numeric_kind`, `min_value`, `max_value`, `career_family`, `career_family_basis`, `min_degree`, `allows_graduating`, `major_names`, `origin`(나눈 요건이면 `split`), `interpretation_note` | `text`는 공고 원문의 일부여야 한다. `items`의 `text`는 요건 `text`의 일부여야 한다. `JobRequirement` 검증(data-contract 2-0)을 통과해야 한다 |
 | `extraction_issues` 후보 | 1-4의 허용 값 5종만 받고 나머지는 버린다 |
 
 - 확인에 실패한 요건은 **버리고** `partial_extraction`을 더한다. 일부만 버려도 나머지로 평가를 진행한다(1-4: `incomplete`이어도 멈추지 않는다).
@@ -698,7 +698,9 @@ LLM은 두 곳에서만 쓴다. 두 곳 모두 응답을 **구조화 출력**(�
 | `skill`·`qualitative` 사유 일치 | 9 / 14 | 5 / 8 | - |
 | 추출이 불완전(`incomplete`)한 공고 | 0 | 1 (2번) | - |
 
-- 비용은 두 모델 모두 무료 티어 안이다. 결제 계정이 연결되지 않았다는 확인은 코드로 할 수 없고, 사용자 확인이 필요하다(미확인).
+- 모델 폐지 일정 (2026-11-04, 공식 폐지 일정 페이지): 세 모델 모두 Stable(GA)이고 preview·폐지 표시가 없다. `gemini-3.1-flash-lite`만 종료 가능 시점이 있다(가장 이른 2027-05-07, 권장 대체 모델 `gemini-3.5-flash-lite`). 나머지 둘은 종료일이 없다. 시연 직전에 다시 확인한다.
+- 비용은 두 모델 모두 무료 티어 안이다. 결제 계정 미연결은 코드로 확인할 수 없어 사용자가 AI Studio에서 확인했다(2026-11-04). 실행 한 번의 호출 수는 12회(요건 추출 6 + 근거 찾기 6)다.
+- 개발·반복 실행의 기본 모델은 `gemini-3.1-flash-lite`다(사용자 결정 2026-11-04, 한도가 넉넉하다). 정확한 모델 ID는 `.env`의 `GEMINI_MODEL`에 적고, `.env.example`의 기본값과 이 문서의 기록을 맞춘다.
 - **주 모델 `gemini-3.8-flash`는 이 세션에서 실행하지 못했다.** 서버가 `503 UNAVAILABLE`("높은 수요")을 돌려줘서 요건 추출 호출 9회가 모두 실패했다(재시도 3회씩). 이 모델이 무엇을 낼지는 모른다. 그래서 "큰 모델이 이 두 작업에서 더 정확한가"라는 D1의 가설은 **미검증**이다. 이번 비교는 경량 모델끼리다. 파이프라인이 안정되면 같은 6건으로 한 번 다시 시험한다.
 - **종합 판정이 맞아도 요건별로는 달랐다.** 숫자 비교(경력·학력)는 코드가 판정하므로 모델이 유형을 다르게 분류해도 종합 판정이 대부분 같았다. 반대로 모델이 잘못 뽑은 숫자 기준은 그대로 판정에 들어간다(아래 `3.1`의 3번).
 - 차이의 원인 (프롬프트·정책을 고치기 전의 관찰이다):
@@ -801,3 +803,4 @@ LLM은 두 곳에서만 쓴다. 두 곳 모두 응답을 **구조화 출력**(�
 - 2026-11-04: 근거 찾기 구현(이슈 #6)을 위한 보완. 13-1에 모델 판정의 코드 처리(근거 인용 없는 `met`은 `needs_check`로 낮춤, `met`의 사유 제거)와 요건·판정 1:1 규칙
 - 2026-11-04: 샘플 실행 도구(이슈 #6). 18장에 `tools/eval_eligibility` 사용법(mock 기본, `--ai`는 동의 플래그와 사전 예산 점검, 화면에 원문·인용을 출력하지 않음)
 - 2026-11-04: LLM 실행 기록(이슈 #6). 18-1 신설: `gemini-3.5-flash-lite`와 `gemini-3.1-flash-lite` 샘플 6건 실행 숫자, `gemini-3.8-flash`는 503으로 미실행(D1의 큰 모델 가설은 미검증), 차이의 원인 관찰. 작업 현황에 후속 5건
+- 2026-11-04: 이슈 #6 마무리. 13-1 요건 추출 칸에 `origin`, `interpretation_note` 추가(프롬프트와 대조하는 테스트가 찾은 누락). 18-1에 결제 미연결 확인과 기본 모델(`gemini-3.1-flash-lite`). `job-gate.md` 작업 현황의 특정 모델·패키지 이름을 공급자 중립으로 정리(판정 규칙·개정일은 그대로)

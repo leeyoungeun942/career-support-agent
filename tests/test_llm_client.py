@@ -357,6 +357,30 @@ def test_module_imports_without_sdk(monkeypatch):
         client.complete_json(req())
 
 
+def test_sdk_client_is_built_with_explicit_key_and_a_request_timeout(monkeypatch):
+    """SDK 호출 경로는 네트워크 없이 시험할 수 없어서, SDK 클라이언트를 만드는 인자만 확인한다."""
+    import google.genai as genai
+
+    seen = {}
+
+    class Spy:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            seen["call"] = kwargs
+            raise RuntimeError("여기서 멈춘다")
+
+    monkeypatch.setattr(genai, "Client", Spy)
+    client = GeminiClient(GeminiSettings(SECRET, "gemini-test"), sleep=lambda s: None)
+    with pytest.raises(LLMStageError):  # 알 수 없는 오류는 재시도 없이 단계 실패
+        client.complete_json(req())
+    assert seen["api_key"] == SECRET and seen["http_options"].timeout == 120_000
+    assert seen["call"]["model"] == "gemini-test"
+    assert seen["call"]["config"].response_mime_type == "application/json"
+
+
 def test_network_is_blocked_in_tests():
     # conftest가 두 이름으로 로드될 수 있어 클래스 객체 대신 이름으로 확인한다
     with pytest.raises(RuntimeError) as e1:  # 이름 조회 단계에서 막힌다

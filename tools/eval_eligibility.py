@@ -118,7 +118,7 @@ def _label(code):
     return DISPLAY_LABELS.get(code, code) if code else "-"
 
 
-def run_all(samples, profile, gates, postings, extract_client, evidence_client, allow_external_profile=False, verbose=False):
+def run_all(samples, profile, gates, postings, extract_client, evidence_client, allow_external_profile=False):
     """샘플을 차례로 평가해 (행 목록, 결과 목록, 중단 사유)를 돌려준다. 단계 실패는 그 공고만 실패로 기록하고 이어간다."""
     rows, results, stopped = [], [], None
     for s in samples:
