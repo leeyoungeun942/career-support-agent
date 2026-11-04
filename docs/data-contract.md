@@ -481,7 +481,124 @@
 
 ---
 
+## 3. pipeline 실행 결과 (`pipeline_run.v1`)
+
+게이트 결과와 자격요건 결과를 `job_id`로 묶고 정렬한 실행 1회의 기록이다. `core/pipeline.py`가 만들고 `tools/run_demo.py`가 `data/results/pipeline/<run_id>.json`에 저장한다. 정책은 [eligibility.md](policies/eligibility.md) 14장(순위)과 16장(저장 범위)이다.
+
+- **입력 공고는 모두 `jobs`에 남긴다.** 평가에 실패했거나 시작하지 못한 공고도 지우지 않는다 (직무 게이트는 공고를 삭제하지 않는다).
+- **정렬은 `evaluation_status=completed`인 공고만 한다.** 나머지는 `ranking`에 넣지 않고 `jobs`에서 상태와 이유를 보인다.
+- 점수는 이 형식에 없다. 점수 계산은 적합성 평가 이슈의 몫이고, 점수가 생기면 새 칸을 추가한다 (정책 14장). 0이나 `null`을 채워 계산한 것처럼 보이게 하지 않는다.
+
+### 3-1. 칸
+
+최상위
+
+| 칸 | 값 | 설명 |
+|---|---|---|
+| `schema_version` | `"pipeline_run.v1"` | |
+| `run_id` | 문자열 | UTC 시각 + 무작위 접미사. 예: `20261104T061500Z-a3f9c1`. 같은 ID의 파일이 있으면 덮어쓰지 않고 접미사를 다시 뽑는다. mock 실행과 AI 실행은 서로 다른 `run_id`다 |
+| `input_fingerprint` | 문자열 | 재현 확인용 단방향 해시. 입력은 공고 `job_id` 목록, 모델 ID, 프롬프트 버전, 생성 설정 식별자뿐이다. **프로필 원문·공고 원문은 넣지 않는다** |
+| `created_at` | UTC 시각 | |
+| `as_of_month` | `YYYY-MM` | 기간 계산 기준 월 (정책 11장) |
+| `profile` | `{profile_id, is_synthetic}` | 어떤 프로필인지와 가상 프로필 여부. 프로필 내용은 넣지 않는다 |
+| `profile_evidence_included` | `true` / `false` | 저장된 자격요건 결과에 프로필 원문 인용이 들어 있는가. 기본 `false` (3-4) |
+| `run_info` | 아래 표 | 실행 조건 |
+| `counts` | `{completed, failed, not_run}` | **계산값.** `jobs`의 상태별 개수 |
+| `jobs` | 공고 목록 | **입력 순서 그대로.** 3-2 |
+| `ranking` | `job_id` 목록 | **계산값.** `included_in_ranking=true`인 공고를 `rank_jobs` 순서로 |
+
+`run_info`
+
+| 칸 | 값 | 설명 |
+|---|---|---|
+| `gate_mode` | `injected` / `mock` | `injected`: 기대 게이트 결과를 넣음(테스트), `mock`: 규칙 + mock AI 자리. 실제 AI는 이슈 #12에서 추가한다 |
+| `eligibility_mode` | `mock` / `ai` | |
+| `model_id` | 문자열 또는 `null` | `ai`일 때 정확한 모델 ID |
+| `prompt_versions` | `{extract_requirements, find_evidence}` | 프롬프트 파일 맨 위의 `version` |
+| `generation_config` | 문자열 또는 `null` | 생성 설정 식별자 (`GeminiClient.config_id`) |
+| `cache_mode` | `memory` / `disk` / `fresh` | `fresh`는 이번 실행만의 공고 추출 캐시 (정책 18장 모델 비교 조건) |
+| `cache_hits`, `input_tokens`, `output_tokens` | 정수 | 사용량 기록의 이번 실행 합계. 프롬프트·응답 내용은 넣지 않는다 |
+
+### 3-2. 공고별 항목 `jobs[]`
+
+| 칸 | 값 | 설명 |
+|---|---|---|
+| `job_id` | 문자열 | 게이트 결과·자격요건 결과와 같은 값 |
+| `job_label` | 문자열 또는 `null` | 화면 표시용 이름(회사명·직무명). **판정에 쓰지 않는다** |
+| `evaluation_status` | `completed` / `failed` / `not_run` | 3-3 |
+| `failure_code` | 3-3의 코드 또는 `null` | `completed`이면 `null`, 아니면 반드시 있다 |
+| `included_in_ranking` | `true` / `false` | **계산값.** `evaluation_status=completed`일 때만 `true` |
+| `rank` | 1부터의 정수 또는 `null` | **계산값.** `ranking`에서의 위치. 정렬에 들어가지 않으면 `null` |
+| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null` |
+| `eligibility` | `eligibility_result.v1` 또는 `null` | `completed`일 때만 있다 |
+| `reference_only` | `true` / `false` | **계산값.** `eligibility.reference_only`. 화면에 "참고용 평가"를 붙인다 |
+| `summary` | 문자열 | **계산값.** `completed`이면 `eligibility.summary` (2-7, 코드가 만든 템플릿). 아니면 3-3의 화면 문구. LLM이 쓰지 않는다 |
+
+값끼리의 관계(`core/pipeline.py`의 모델이 검사한다): `included_in_ranking=true`이면 `eligibility`가 있고 `eligibility.gate_ranking_group == gate.ranking_group`이다. `ranking`의 `job_id`는 겹치지 않고, `included_in_ranking=true`인 공고와 1:1이다. `rank`는 `ranking`의 순서와 같다. `counts`는 `jobs`와 맞는다. `jobs`에 같은 `job_id`가 둘 이상 있으면 오류다.
+
+### 3-3. 평가 상태와 실패 코드
+
+| `evaluation_status` | 뜻 |
+|---|---|
+| `completed` | 자격요건 결과가 만들어졌다. 정렬에 들어간다 |
+| `failed` | 이 공고의 평가를 시도했으나 실패했다 |
+| `not_run` | 평가를 시작하지 않았다 (앞 공고에서 한도가 소진됨) |
+
+| `failure_code` | 쓰는 상태 | 뜻 | 화면 문구 |
+|---|---|---|---|
+| `stage_failed` | `failed` | 요건 추출·근거 찾기의 통신 또는 스키마 위반 | 평가 실패: AI 단계 오류 |
+| `evidence_check_failed` | `failed` | 프로필 근거 검증 실패 | 평가 실패: 프로필 근거 검증 |
+| `assembly_failed` | `failed` | 결과 조립 실패 | 평가 실패: 결과 조립 |
+| `input_invalid` | `failed` | 이 공고의 입력이 없거나 어긋남 | 평가 실패: 공고 입력 오류 |
+| `quota_exhausted` | `failed`(한도에 닿은 공고) 또는 `not_run`(뒤 공고) | 호출 한도 소진 | 평가 중단: 호출 한도 소진 / 평가 안 함: 호출 한도 소진 |
+
+- 오류 메시지의 원문(모델 출력, 프로필 인용, 예외 내용)은 어디에도 옮기지 않는다. 범주 이름만 쓴다.
+- **실행 자체를 시작하지 않는 경우**(입력 파일이 없음, 6건 대응이 어긋남, 하루 호출 예산 부족)는 공고별 상태가 아니고 결과 파일도 만들지 않는다.
+- 한도 소진(`LLMQuotaExceeded`)이 나면 그 공고는 `failed`, 그 뒤 공고는 `not_run`이고 앞 공고의 결과는 그대로 남는다. `not_run`만 이어서 다시 돌리는 기능은 이 버전에 없다.
+
+### 3-4. 저장 범위
+
+- 저장 위치는 `data/results/pipeline/`이고 `.gitignore`에 들어 있다. 커밋하지 않는다.
+- **기본으로는 프로필 원문 인용(`profile_evidence`)을 저장하지 않는다.** 저장하는 `eligibility`에서 각 요건·항목의 `profile_evidence`를 비우고 `profile_evidence_included=false`로 표시한다. 요건 상태·사유·`compared`·`job_quote`는 남긴다.
+- `--save-profile-evidence`를 줄 때만 인용을 저장하고(`profile_evidence_included=true`), 이 플래그는 가상 프로필에서만 쓴다. LLM 캐시의 `--cache-profile`과는 별개다.
+- 인용을 뺀 파일도 **개인정보로 취급한다.** `interpretation_note`와 `question_for_user`는 모델이 쓸 수 있어 프로필 내용이 섞일 수 있고, 인용이 없는 `met`은 원본 프로필 없이는 다시 검증할 수 없다. 그래서 인용을 뺀 것은 "원문이 그대로 남지 않게 줄인 것"이고 공유해도 되는 파일이 아니다.
+- 공고 원문은 저장하지 않는다. `job_quote`와 요건 `text`에 공고 원문의 일부가 들어 있으므로 실제 공고를 쓸 때는 공개 범위를 먼저 정한다.
+
+## 4. 선택한 공고의 전달 (`selected_job.v1`) — **초안, 자소서·포트폴리오 Agent 담당과 합의 전**
+
+사용자가 `ranking`에서 1건을 고르면 그 공고를 자소서·포트폴리오 Agent에 넘기기 위한 형식이다. 받는 쪽이 필요한 칸은 합의하면서 바꾼다. 이 초안은 "받는 쪽이 읽기 쉬운 최소 칸"으로 시작한다.
+
+| 칸 | 값 | 설명 |
+|---|---|---|
+| `schema_version` | `"selected_job.v1"` | |
+| `run_id`, `job_id`, `job_label` | | `pipeline_run.v1`의 같은 칸 |
+| `selected_at` | UTC 시각 | |
+| `profile` | `{profile_id, is_synthetic}` | |
+| `profile_evidence_included` | `true` / `false` | 인용을 담았는가. `--select`와 `--save-profile-evidence`를 함께 줄 때만 `true` |
+| `gate` | 게이트 결과 요약 | `result`, `ranking_group`, `core_family`, `summary` |
+| `eligibility` | `eligibility_result.v1` | 인용은 `profile_evidence_included`에 따른다 |
+| `posting_ref` | 문자열 | 공고 원문이 있는 곳(파일과 키). 원문을 파일에 복사하지 않는다 |
+| `selection_warning_codes` | 목록 | **계산값.** 아래 표. 비어 있을 수 있다 |
+| `selection_notices` | 문구 목록 | **계산값.** 경고 코드마다 아래 문구 1개. 코드가 만든다 |
+
+| 경고 코드 | 조건 | 문구 |
+|---|---|---|
+| `reference_only` | `gate_ranking_group != primary` | 직무가 달라 참고용으로만 평가했습니다 |
+| `eligibility_not_met` | `verdict=not_eligible` | 필수 요건 미충족 공고입니다 |
+| `extraction_incomplete` | `extraction_status=incomplete` | 공고의 자격요건을 완전히 읽지 못했습니다 |
+
+- **`evaluation_status`가 `completed`가 아닌 공고는 선택할 수 없다.** 그래서 평가 실패용 경고 코드는 없다.
+- **`not_eligible`이나 참고용 공고도 선택은 막지 않는다.** 선택은 사용자의 결정이다. 대신 경고 코드와 문구가 따라간다.
+- **받는 쪽은 경고를 지우거나 덮어쓰지 않는다**(계약). 이 저장소가 받는 쪽 코드를 막을 수는 없으므로 팀원과 합의할 때 이 문장을 포함한다. 경고는 결과에서 계산하므로 입력으로 받지 않는다.
+- **개인정보.** 인용이 든 파일은 `data/results/`에만 쓰고 커밋하지 않는다. 자소서 Agent가 외부 LLM을 쓰면 이 내용이 외부로 나가므로 정책 16장의 같은 제한(가상 프로필만, 별도 승인 없이는 실제 프로필 금지)이 그대로 적용되고, 받는 쪽이 전달받을 때 다시 검사한다. 자동 삭제는 없고 필요 없어지면 손으로 지운다.
+
+---
+
 ## 변경 이력과 이전 방법
+
+### `pipeline_run.v1`, `selected_job.v1` 신설 (2026-11-04, 이슈 #7)
+
+새 형식이라 이전할 것이 없다. 3장은 `core/pipeline.py`와 `tools/run_demo.py`를, 4장은 팀원과 합의 뒤 `select_job`을 구현할 때 쓴다. 4장은 합의 전 초안이다.
 
 ### `job_gate_result.v1` → `v2` (2026-11-02)
 
