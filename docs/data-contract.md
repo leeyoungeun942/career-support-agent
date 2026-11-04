@@ -568,6 +568,15 @@
 
 사용자가 `ranking`에서 1건을 고르면 그 공고를 자소서·포트폴리오 Agent에 넘기기 위한 형식이다. 받는 쪽이 필요한 칸은 합의하면서 바꾼다. 이 초안은 "받는 쪽이 읽기 쉬운 최소 칸"으로 시작한다.
 
+**구현 상태 (2026-11-04):** 합의가 늦어져 이 초안대로 구현했다(`core/selection.py`). 팀원과 합의하면 이 장과 코드를 함께 고친다.
+
+- 함수: `select_job(run, job_id, include_profile_evidence=False, posting_ref=None) -> SelectedJob`. 실행: `python -m tools.run_demo --select <job_id> [--save-profile-evidence]`. 실행 결과를 저장한 뒤 그 `run_id`로 고르므로 선택 파일과 실행 결과 파일의 `run_id`가 같다.
+- 파일: `data/results/selection/<run_id>-<job_id>.json`. 같은 이름이 있으면 덮어쓰지 않는다. `job_id`는 영문·숫자·`_`·`.`·`-`만 쓸 수 있고 첫 글자는 영문·숫자다(경로 문자를 막는다).
+- 없는 `job_id`는 실행을 시작하기 전에 거부한다(AI 호출을 쓰지 않는다).
+- `gate`는 `result`, `ranking_group`, `core_family`, `summary`만 담는다. 업무 항목 원문이 든 `detail`은 넘기지 않는다.
+- `posting_ref`: `--ai`이면 `<공고 원문 파일>#<job_id>`, mock이면 `synthetic-posting:<job_id>`(fixture에서 만든 합성 공고라 실제 원문이 아니다).
+- 경고(`selection_warning_codes`, `selection_notices`)는 파일에서 지워도 다시 읽을 때 `eligibility`와 `gate`에서 다시 계산된다.
+
 | 칸 | 값 | 설명 |
 |---|---|---|
 | `schema_version` | `"selected_job.v1"` | |

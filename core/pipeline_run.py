@@ -111,11 +111,24 @@ class PipelineJob(BaseModel):
         return self
 
 
-def _has_quote(job: PipelineJob) -> bool:
-    if job.eligibility is None:
+def has_profile_evidence(eligibility: EligibilityResult | None) -> bool:
+    """자격요건 결과에 프로필 원문 인용이 하나라도 있는가."""
+    if eligibility is None:
         return False
     return any(res.profile_evidence or any(it.profile_evidence for it in res.item_results)
-               for res in job.eligibility.requirement_results)
+               for res in eligibility.requirement_results)
+
+
+def strip_profile_evidence(eligibility: EligibilityResult) -> EligibilityResult:
+    """프로필 원문 인용을 비운 복사본. 상태·사유·비교식·공고 인용은 남긴다 (정책 16장)."""
+    results = [
+        res.model_copy(update={
+            "profile_evidence": [],
+            "item_results": [it.model_copy(update={"profile_evidence": []}) for it in res.item_results],
+        })
+        for res in eligibility.requirement_results
+    ]
+    return eligibility.model_copy(update={"requirement_results": results})
 
 
 class PipelineRun(BaseModel):
@@ -153,24 +166,13 @@ class PipelineRun(BaseModel):
             got = {j.job_id: j.rank for j in done}
             if got != expected:
                 raise ValueError(f"rank가 rank_jobs 결과와 다르다: 저장 {got}, 계산 {expected}")
-        if not self.profile_evidence_included and any(_has_quote(j) for j in self.jobs):
+        if not self.profile_evidence_included and any(has_profile_evidence(j.eligibility) for j in self.jobs):
             raise ValueError("profile_evidence_included=false인데 프로필 인용이 들어 있다")
         return self
 
     def without_profile_evidence(self) -> "PipelineRun":
         """프로필 원문 인용을 비운 복사본 (기본 저장 형태, 정책 16장). 상태·사유·비교식·공고 인용은 남긴다."""
-        jobs = []
-        for job in self.jobs:
-            if job.eligibility is None:
-                jobs.append(job)
-                continue
-            results = [
-                res.model_copy(update={
-                    "profile_evidence": [],
-                    "item_results": [it.model_copy(update={"profile_evidence": []}) for it in res.item_results],
-                })
-                for res in job.eligibility.requirement_results
-            ]
-            jobs.append(job.model_copy(update={"eligibility": job.eligibility.model_copy(update={"requirement_results": results})}))
+        jobs = [j if j.eligibility is None else j.model_copy(update={"eligibility": strip_profile_evidence(j.eligibility)})
+                for j in self.jobs]
         return PipelineRun.model_validate({**self.model_dump(), "jobs": [j.model_dump() for j in jobs], "profile_evidence_included": False})
 

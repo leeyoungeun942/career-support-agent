@@ -5,6 +5,8 @@
     python -m tools.run_demo -q                   # 공고 id·순위·코드만 낸다
     python -m tools.run_demo --gate injected      # 게이트 결과를 fixture 값으로 넣는다 (게이트 입력 파일이 없을 때의 기본)
     python -m tools.run_demo --save-profile-evidence   # 저장 파일에 프로필 원문 인용도 넣는다 (가상 프로필 한정, 정책 16장)
+    python -m tools.run_demo --select sample-3    # 고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(selected_job.v1 초안)로 저장한다
+    python -m tools.run_demo --select sample-3 --save-profile-evidence   # 파일에 프로필 인용도 담는다 (가상 프로필 한정)
     python -m tools.run_demo --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
                                                   # 자격요건 단계만 실제 Gemini. 게이트의 AI 자리는 mock이다 (실제 연결은 이슈 #12)
 
@@ -12,11 +14,13 @@
 공고 수집·항목 분리는 이 도구의 범위 밖이다. 사전에 준비한 입력을 읽는다.
 점수는 계산하지 않는다. 순위는 ranking_group -> verdict -> 입력 순서다 (정책 14장).
 결과는 data/results/pipeline/<run_id>.json에 저장한다(커밋하지 않음). 기본으로는 프로필 원문 인용을 빼고 저장한다.
+선택 파일은 data/results/selection/<run_id>-<job_id>.json이다. 평가를 마치지 못한 공고는 선택할 수 없고, 불일치·미충족 공고는 경고 문구와 함께 선택할 수 있다.
 --ai의 안내, 동의, 하루 호출 예산 점검은 tools.eval_eligibility와 같다. 공고 원문은 data/sample-jobs/eligibility_sample_postings.json에서 읽는다.
 화면에는 순위, 판정, 코드가 만든 사유 문구를 낸다. 프로필 인용, 공고 원문 전체, 모델 출력과 오류 내용은 출력하지 않는다.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +29,7 @@ from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_po
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
 from core.pipeline_run import PipelineRun, ProfileRef
 from core.schemas import DISPLAY_LABELS
+from core.selection import JOB_ID_PATTERN, SelectedJob, SelectionRefused, select_job
 from tools import eval_eligibility as ev
 
 REPO = Path(__file__).resolve().parents[1]
@@ -150,6 +155,21 @@ def save_run(run: PipelineRun, directory: Path, save_profile_evidence: bool = Fa
     raise OSError("새 run_id를 뽑지 못했다")
 
 
+def save_selection(selected: SelectedJob, directory: Path) -> Path:
+    """선택 파일을 directory/<run_id>-<job_id>.json에 쓴다. 같은 이름이 있으면 덮어쓰지 않는다(FileExistsError)."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{selected.run_id}-{selected.job_id}.json"
+    with path.open("x", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(json.loads(selected.model_dump_json()), ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def load_selection(path: Path) -> SelectedJob:
+    """저장한 선택 파일을 읽고 다시 검증한다. 경고는 읽을 때 다시 계산하므로 파일에서 지워도 사라지지 않는다."""
+    return SelectedJob.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
+
 def load_run(path: Path) -> PipelineRun:
     """저장한 실행 결과를 읽고 다시 검증한다."""
     return PipelineRun.model_validate_json(Path(path).read_text(encoding="utf-8"))
@@ -157,7 +177,35 @@ def load_run(path: Path) -> PipelineRun:
 
 # ---------------------------------------------------------------- 실행
 
-def _finish(run: PipelineRun, args) -> int:
+def _check_select(args, jobs) -> str | None:
+    """--select 값이 입력 공고에 있는지 실행 전에 확인한다(호출을 쓰기 전에 거른다). 문제가 있으면 안내 문구."""
+    if args.select is None:
+        return None
+    if not re.match(JOB_ID_PATTERN, args.select):
+        return "--select의 job_id 형식이 올바르지 않다"
+    if args.select not in [j.job_id for j in jobs]:
+        return f"--select {args.select!r}는 이번 공고 목록에 없다: {[j.job_id for j in jobs]}"
+    return None
+
+
+def _select(saved: PipelineRun, args, posting_ref) -> int:
+    """고른 공고를 선택 파일로 저장하고 경고를 보인다. 저장한 실행 결과(saved)에서 고르므로 run_id가 저장 파일과 같다."""
+    try:
+        selected = select_job(saved, args.select, include_profile_evidence=args.save_profile_evidence, posting_ref=posting_ref)
+        path = save_selection(selected, RESULTS_DIR / "selection")
+    except SelectionRefused as e:
+        print(f"선택하지 않았다: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    kind = "프로필 인용 포함" if selected.profile_evidence_included else "프로필 인용 제외"
+    print(f"선택: {selected.job_id} -> {path.relative_to(REPO) if path.is_relative_to(REPO) else path} ({kind}, 커밋하지 않는 파일, 초안 형식)")
+    if not selected.profile_evidence_included:
+        print("  인용은 담지 않았다. 가상 프로필의 인용까지 넘기려면 --save-profile-evidence를 함께 준다.")
+    for notice in selected.selection_notices:
+        print(f"  경고: {notice}")
+    return 0
+
+
+def _finish(run: PipelineRun, args, posting_ref=lambda job_id: None) -> int:
     print("\n".join(render(run, args.quiet)))
     try:
         path, saved = save_run(run, RESULTS_DIR / "pipeline", args.save_profile_evidence)
@@ -167,6 +215,8 @@ def _finish(run: PipelineRun, args) -> int:
     kind = "프로필 인용 포함" if saved.profile_evidence_included else "프로필 인용 제외"
     print(f"저장: {path.relative_to(REPO) if path.is_relative_to(REPO) else path} ({kind}, 커밋하지 않는 파일)")
     counts = saved.counts
+    if args.select and _select(saved, args, posting_ref(args.select)):
+        return EXIT_REFUSED
     if counts["not_run"]:
         return 3
     return 0 if counts["failed"] == 0 else 1
@@ -178,10 +228,13 @@ def run_mock(args) -> int:
     except (ScenarioError, FileNotFoundError) as e:
         print(f"실행할 수 없다: {e}", file=sys.stderr)
         return EXIT_REFUSED
+    if problem := _check_select(args, jobs):
+        print(f"실행할 수 없다: {problem}", file=sys.stderr)
+        return EXIT_REFUSED
     samples, _, evidence, _ = ev.load_fixtures()
     run = run_pipeline(jobs, profile, PROFILE_REF, make_extraction_mock(samples), make_evidence_mock(samples, evidence),
                        desired_family=desired)
-    return _finish(run, args)
+    return _finish(run, args, lambda job_id: f"synthetic-posting:{job_id} (fixture에서 만든 합성 공고, 실제 원문이 아니다)")
 
 
 def run_ai(args) -> int:
@@ -196,10 +249,15 @@ def run_ai(args) -> int:
     except (ScenarioError, FileNotFoundError) as e:
         print(f"실행할 수 없다: {e}", file=sys.stderr)
         return EXIT_REFUSED
+    if problem := _check_select(args, jobs):
+        print(f"실행할 수 없다: {problem}", file=sys.stderr)  # 호출을 쓰기 전에 거른다
+        return EXIT_REFUSED
     cache_mode = "fresh" if args.fresh_cache else ("disk" if args.cache_profile else "memory")
     run = run_pipeline(jobs, profile, PROFILE_REF, session.client, session.client, desired_family=desired,
                        allow_external_profile=True, usage=session.usage, cache_mode=cache_mode)
-    code = _finish(run, args)
+    postings_file = Path(args.postings)
+    postings_file = postings_file.relative_to(REPO) if postings_file.is_relative_to(REPO) else postings_file
+    code = _finish(run, args, lambda job_id: f"{postings_file.as_posix()}#{job_id}")
     t, after = session.usage.run_totals(), session.usage.calls_today(session.settings.model)
     print(f"이번 실행({session.usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
           f"오늘 누적 {after}/{session.settings.rpd} (모델 {session.settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
@@ -214,6 +272,7 @@ def main(argv=None):
     p.add_argument("--accept-free-tier-terms", action="store_true", help="무료 티어 입력이 제품 개선에 쓰일 수 있음에 동의")
     p.add_argument("--gate", choices=("auto", "injected", "mock"), default="auto", help="게이트 결과를 만드는 방식")
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
+    p.add_argument("--select", metavar="JOB_ID", help="고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(초안 형식)로 저장한다")
     p.add_argument("--save-profile-evidence", action="store_true", help="저장 파일에 프로필 원문 인용을 넣는다 (가상 프로필 한정)")
     p.add_argument("--cache-profile", action="store_true", help="근거 찾기 결과를 디스크에 캐시한다(가상 프로필 개발용)")
     p.add_argument("--fresh-cache", action="store_true", help="이번 실행만의 공고 추출 캐시를 쓴다(모델 비교용)")
