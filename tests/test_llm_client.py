@@ -290,6 +290,15 @@ def test_usage_log_has_no_prompt_or_response_content(tmp_path):
     assert set(row) == {"ts", "date_pt", "stage", "job_id", "model", "input_tokens", "output_tokens", "cached", "ok"}
 
 
+def test_failed_attempt_logs_error_kind_and_code_but_not_the_message(tmp_path):
+    client, _, _, log = gemini([FakeAPIError(503), OK], tmp_path, rpm=60)
+    client.complete_json(req())
+    rows = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+    assert [r["ok"] for r in rows] == [False, True]
+    assert rows[0]["error"] == "FakeAPIError 503" and "error" not in rows[1]
+    assert SECRET not in log.path.read_text(encoding="utf-8")
+
+
 def test_missing_key_or_model_gives_guidance():
     with pytest.raises(LLMConfigError, match="GEMINI_API_KEY"):
         GeminiSettings.from_env({"GEMINI_MODEL": "m"})

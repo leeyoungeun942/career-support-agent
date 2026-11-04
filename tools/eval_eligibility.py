@@ -82,23 +82,26 @@ def _signature(items):
 
 
 def compare_sample(sample, requirements, result):
-    """기대(fixture)와 결과를 비교한다. 요건 수·유형 순서가 같을 때만 요건별 비교를 한다.
+    """기대(fixture)와 결과를 필수(level=required) 요건끼리 비교한다. 정책 17장 표는 필수 요건 기준이다.
 
-    돌려주는 값: sig_ok(요건 수·level·type·numeric_kind 일치), verdict_ok, decisive_ok(요건 위치로 비교), 요건별 (기대, 결과) 행.
+    우대사항은 모델이 요건으로 뽑는 것이 정상이므로 비교에서 빼고 개수만 센다. 필수 요건 수가 같으면 위치 순서로 짝지어 상태·사유를
+    비교한다(요건 text는 모델이 원문에서 복사하므로 fixture와 글자가 달라 id·text로는 짝지을 수 없다).
+    돌려주는 값: count_ok(필수 요건 수 일치), sig_ok(수와 유형·numeric_kind까지 일치), verdict_ok, decisive_ok(위치로 비교),
+    요건별 (기대, 결과) 행, 추가로 뽑은 우대·기타 요건 수.
     """
-    expected = sample["requirements"]
-    sig_ok = _signature(expected) == _signature(requirements)
-    rows = []
-    if sig_ok:
-        for want, res in zip(expected, result.requirement_results):
-            rows.append((want, res))
-    decisive_ok = None
-    if sig_ok:
-        index = {r["id"]: i for i, r in enumerate(expected)}
-        want_pos = [index[i] for i in sample["expected"]["decisive"]]
-        got_pos = [next(i for i, r in enumerate(requirements) if r.id == d) for d in result.decisive_requirement_ids]
+    expected = [r for r in sample["requirements"] if r["level"] == "required"]
+    got_at = [i for i, r in enumerate(requirements) if r.level == "required"]
+    count_ok = len(expected) == len(got_at)
+    sig_ok = count_ok and _signature(expected) == _signature([requirements[i] for i in got_at])
+    rows, decisive_ok = [], None
+    if count_ok:
+        rows = [(want, result.requirement_results[i]) for want, i in zip(expected, got_at)]
+        want_pos = [next(k for k, r in enumerate(expected) if r["id"] == d) for d in sample["expected"]["decisive"]]
+        got_pos = [got_at.index(next(i for i, r in enumerate(requirements) if r.id == d)) for d in result.decisive_requirement_ids]
         decisive_ok = want_pos == got_pos
-    return {"sig_ok": sig_ok, "verdict_ok": result.verdict == sample["expected"]["verdict"], "decisive_ok": decisive_ok, "rows": rows}
+    return {"count_ok": count_ok, "sig_ok": sig_ok, "verdict_ok": result.verdict == sample["expected"]["verdict"],
+            "decisive_ok": decisive_ok, "rows": rows, "expected_required": len(expected), "got_required": len(got_at),
+            "extra_other": len(requirements) - len(got_at), "expected_other": len(sample["requirements"]) - len(expected)}
 
 
 def expected_status(req):
@@ -144,7 +147,7 @@ def report(rows, results, gates, verbose=False):
     n = len(rows)
     ok_rows = [r for r in rows if r["result"] is not None]
     m = {"samples": n, "completed": len(ok_rows), "failed": n - len(ok_rows),
-         "sig_ok": sum(r["cmp"]["sig_ok"] for r in ok_rows), "verdict_ok": sum(r["cmp"]["verdict_ok"] for r in ok_rows),
+         "count_ok": sum(r["cmp"]["count_ok"] for r in ok_rows), "sig_ok": sum(r["cmp"]["sig_ok"] for r in ok_rows), "verdict_ok": sum(r["cmp"]["verdict_ok"] for r in ok_rows),
          "decisive_ok": sum(bool(r["cmp"]["decisive_ok"]) for r in ok_rows), "status_ok": 0, "status_total": 0,
          "reason_ok": 0, "reason_total": 0}
     for r in rows:
@@ -154,8 +157,9 @@ def report(rows, results, gates, verbose=False):
             continue
         c, res = r["cmp"], r["result"]
         print(f"[{s['job_id']}] 종합 {_label(res.verdict)} (기대 {_label(s['expected']['verdict'])}) "
-              f"| 요건 {len(res.requirements)}개 {'(기대와 같은 구성)' if c['sig_ok'] else '(기대와 구성이 다름: 요건별 비교 생략)'} "
-              f"| {_label(res.extraction_status)}")
+              f"| 필수 요건 {c['got_required']}개(기대 {c['expected_required']}) "
+              f"{'유형 일치' if c['sig_ok'] else ('수만 일치: 유형이 다른 곳이 있음' if c['count_ok'] else '수가 다름: 요건별 비교 생략')} "
+              f"| 우대·기타 {c['extra_other']}개(기대 {c['expected_other']}) | {_label(res.extraction_status)}")
         for want, got in c["rows"]:
             m["status_total"] += 1
             same = got.status == expected_status(want)
@@ -168,7 +172,8 @@ def report(rows, results, gates, verbose=False):
                       f"{' / ' + _label(got.reason_code) if got.reason_code else ''}")
     ranked = [r.job_id for r in rank_jobs(results, [gates[r.job_id] for r in results])] if results else []
     print(f"\n정렬 결과: {ranked}")
-    print(f"완료 {m['completed']}/{n}, 요건 구성 일치 {m['sig_ok']}/{m['completed']}, 종합 판정 일치 {m['verdict_ok']}/{m['completed']}, "
+    print(f"완료 {m['completed']}/{n}, 필수 요건 수 일치 {m['count_ok']}/{m['completed']}, 수·유형 일치 {m['sig_ok']}/{m['completed']}, "
+          f"종합 판정 일치 {m['verdict_ok']}/{m['completed']}, "
           f"결정적 요건 일치 {m['decisive_ok']}/{m['completed']}")
     print(f"요건별 상태 일치 {m['status_ok']}/{m['status_total']}, skill·qualitative 사유 일치 {m['reason_ok']}/{m['reason_total']}")
     m["ranked"] = ranked

@@ -158,12 +158,14 @@ class UsageLog:
         return self._now().astimezone(PACIFIC).date().isoformat()
 
     def record(self, request: LLMRequest, *, model: str, input_tokens: int = 0, output_tokens: int = 0,
-               cached: bool = False, ok: bool = True) -> None:
+               cached: bool = False, ok: bool = True, error: str | None = None) -> None:
         row = {
             "ts": self._now().astimezone(timezone.utc).isoformat(timespec="seconds"),
             "date_pt": self.pacific_date(), "stage": request.stage, "job_id": request.job_id, "model": model,
             "input_tokens": input_tokens, "output_tokens": output_tokens, "cached": cached, "ok": ok,
         }
+        if error:  # 실패한 시도만. 오류 종류와 코드뿐이고 메시지는 쓰지 않는다(키·프롬프트가 섞일 수 있다)
+            row["error"] = error
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -423,7 +425,9 @@ class GeminiClient(BaseClient):
                 text, tokens_in, tokens_out = self._generate(request)
             except Exception as e:  # noqa: BLE001 - SDK 예외를 모두 감싸 키·원시 오류가 새지 않게 한다
                 if self.usage:
-                    self.usage.record(request, model=self.model, ok=False)
+                    code = getattr(e, "code", None)
+                    self.usage.record(request, model=self.model, ok=False,
+                                      error=type(e).__name__ + (f" {code}" if isinstance(code, int) else ""))
                 wait = self._retry_wait(e, attempt, request)
                 attempt += 1
                 self._sleep(wait)

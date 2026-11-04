@@ -19,7 +19,8 @@ def test_mock_chain_reproduces_policy_17_and_14(capsys):
     n = len(SAMPLES)
     assert metrics["completed"] == n and metrics["failed"] == 0
     assert (metrics["sig_ok"], metrics["verdict_ok"], metrics["decisive_ok"]) == (n, n, n)
-    assert metrics["status_ok"] == metrics["status_total"] == 30
+    assert metrics["status_ok"] == metrics["status_total"] == 29  # 필수 요건 29개(우대 preference 1개는 비교 대상이 아니다)
+    assert metrics["count_ok"] == n
     assert metrics["reason_ok"] == metrics["reason_total"] == 19
     assert metrics["ranked"] == POLICY_14_ORDER
     out = capsys.readouterr().out
@@ -263,3 +264,34 @@ def test_pipeline_does_not_allow_external_profile_by_default():
     assess_eligibility(synthetic_posting(sample), GATES[sample["job_id"]], PROFILE, tool.make_extraction_mock([sample]), judge,
                        allow_external_profile=True)
     assert len(judge.requests) == 1
+
+
+# ---------------------------------------------------------------- 실제 모델 결과 비교 방식 (필수 요건 기준)
+
+def test_extra_preferred_requirements_do_not_break_comparison():
+    sample = SAMPLES[2]  # 3번
+    extra = {"level": "preferred", "type": "numeric", "numeric_kind": "career_years", "min_value": 1, "text": "경력 1년 이상"}
+    sample_posting_extra = synthetic_posting(sample) + "\n우대사항:\n- 경력 1년 이상"
+
+    answer = extraction_answer(sample)
+    answer["requirements"].append(extra)  # 맨 뒤에 붙이므로 근거 mock의 R번호는 그대로다
+    reqs, result = assess_eligibility(sample_posting_extra, GATES[sample["job_id"]], PROFILE, FakeClient([answer]),
+                                      tool.make_evidence_mock([sample], EVIDENCE))
+    cmp = tool.compare_sample(sample, reqs, result)
+    assert cmp["count_ok"] and cmp["sig_ok"] and cmp["decisive_ok"] and cmp["extra_other"] == 1
+    assert all(got.status == tool.expected_status(want) for want, got in cmp["rows"])
+
+
+def test_same_count_but_different_type_is_count_ok_not_sig_ok():
+    sample = SAMPLES[3]
+    reqs, result = _assess(sample)
+    flipped = [r.model_copy(update={"type": "qualitative" if r.type == "skill" else r.type}) for r in reqs]
+    cmp = tool.compare_sample(sample, flipped, result)
+    assert cmp["count_ok"] and not cmp["sig_ok"] and len(cmp["rows"]) == 3
+
+
+def test_fewer_required_requirements_than_expected_skips_row_comparison():
+    sample = SAMPLES[0]
+    reqs, result = _assess(sample)
+    cmp = tool.compare_sample(sample, reqs[:-1], result)
+    assert not cmp["count_ok"] and cmp["rows"] == [] and cmp["decisive_ok"] is None
