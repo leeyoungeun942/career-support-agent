@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from core.llm_client import MockClient
 
 EXTRACT_STAGE = "extract_requirements"
+EVIDENCE_STAGE = "find_evidence"
 _EXTRACT_KEYS = (
     "level", "type", "text", "combine", "items", "numeric_kind", "min_value", "max_value", "career_family",
     "career_family_basis", "min_degree", "allows_graduating", "major_names", "origin", "interpretation_note",
@@ -33,3 +34,21 @@ def extraction_answer(sample: Mapping) -> dict:
 
 def make_extraction_mock(samples: list[Mapping]) -> MockClient:
     return MockClient({(EXTRACT_STAGE, s["job_id"]): extraction_answer(s) for s in samples})
+
+
+def evidence_answer(sample: Mapping, evidence: Mapping, code_ids: bool = True) -> dict:
+    """표본의 skill·qualitative 요건마다 근거 mock 판정을 근거 찾기 응답(EvidenceResponse) 모양으로 만든다.
+
+    evidence는 eligibility_evidence_mock.json의 "judgements"(fixture 요건 id -> 판정)이다.
+    code_ids=True이면 요건 id를 요건 추출이 붙이는 R1, R2…(표본 안의 순서)로 바꾼다. 요건 추출 mock과 이어 쓸 때의 id다.
+    """
+    out = []
+    for position, r in enumerate(sample["requirements"], start=1):
+        if r["type"] not in ("skill", "qualitative"):
+            continue
+        out.append({"requirement_id": f"R{position}" if code_ids else r["id"], **evidence[r["id"]]})
+    return {"judgements": out}
+
+
+def make_evidence_mock(samples: list[Mapping], evidence: Mapping, code_ids: bool = True) -> MockClient:
+    return MockClient({(EVIDENCE_STAGE, s["job_id"]): evidence_answer(s, evidence, code_ids) for s in samples})

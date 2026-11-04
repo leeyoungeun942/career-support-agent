@@ -73,6 +73,7 @@ class LLMClient(Protocol):
     """요건 추출과 근거 찾기가 쓰는 호출 창구."""
 
     model: str
+    external: bool  # 입력이 외부 서비스로 나가는가. 나가면 프로필을 보내려면 호출하는 쪽의 명시적 허용이 필요하다 (정책 16장)
 
     def complete_json(self, request: LLMRequest) -> LLMResponse:
         ...
@@ -98,6 +99,7 @@ class BaseClient:
     """공통 뼈대: 구현체는 _complete만 만들고, 응답 검증은 여기서 한 번 한다."""
 
     model = ""
+    external = False
 
     def complete_json(self, request: LLMRequest) -> LLMResponse:
         raw = self._complete(request)
@@ -210,6 +212,10 @@ class CachedClient:
     @property
     def model(self) -> str:
         return self.inner.model
+
+    @property
+    def external(self) -> bool:
+        return getattr(self.inner, "external", True)  # 모르면 외부로 본다
 
     def _disk_dir(self, request: LLMRequest) -> Path | None:
         if not request.contains_profile:
@@ -356,6 +362,8 @@ class GeminiClient(BaseClient):
     - 일시 오류(5xx, 네트워크, 분당 제한 429)만 지수 대기로 MAX_RETRIES회 재시도한다. 일일 한도 429는 LLMQuotaExceeded.
     - generate, sleep, clock은 테스트에서 바꿔 끼운다.
     """
+
+    external = True
 
     def __init__(self, settings: GeminiSettings, usage: UsageLog | None = None, *,
                  generate: Callable[[LLMRequest], tuple[str, int, int]] | None = None,
