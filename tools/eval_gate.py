@@ -4,7 +4,9 @@
     python -m tools.eval_gate --set dev            # mock (기본): AI 자리에 정답 항목 라벨을 넣는다
     python -m tools.eval_gate --set dev -v         # 틀린 공고의 항목별 차이와 근거를 보여 준다
     python -m tools.eval_gate --set holdout        # 확인셋: 개발셋 튜닝이 끝난 뒤 한 번만 돌린다 (6-4: 다시 재지 않는다)
-    python -m tools.eval_gate --set dev --ai       # 실제 AI: 아직 연결하지 않았다 (job-gate.md 8장 보류)
+    python -m tools.eval_gate --set sample         # 샘플 6건 (mock). 항목 라벨·핵심 직무군·판정·사유·경고를 정책 7-1 기대와 비교한다
+    python -m tools.eval_gate --set sample --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
+                                                   # 샘플 6건을 실제 Gemini로 (논리 호출 약 20회, 공고 정보만 보낸다, 정책 6-5)
 
 mock의 의미: AI가 항상 정답 항목 라벨을 고른다고 가정한 상한이다 (core/job_gate_mock.py). 그래서 틀린 공고는 규칙이 만든 오류다.
 단, AI가 고를 수 있는 라벨 목록(후보 직무군 + 공통·범위외·혼합) 안에 정답이 없으면 mock도 정답을 낼 수 없어 혼합을 내고 따로 센다(후보 탐색 누락).
@@ -12,6 +14,11 @@ mock의 의미: AI가 항상 정답 항목 라벨을 고른다고 가정한 상�
 
 데이터: data/raw/eval_cases.json (공고 원문과 정답이라 커밋하지 않는다). 정답 파일은 판정·라벨이 한글이라 읽을 때 코드값으로 바꾼다.
 원본은 이전 작업 폴더의 eval_gate.py다.
+
+실제 AI(--ai)는 샘플 6건(--set sample)에서만 동작한다. 개발셋·확인셋의 실제 AI 평가는 후속 이슈라 다른 셋과 함께 주면 거부한다 (정책 8장, 6-5).
+샘플 데이터: data/sample-jobs/gate_sample_cases.json(공고 원문, 커밋하지 않는 파일)과 tests/fixtures/job_gate_sample_expected.json(기대 판정).
+기본은 mock이고 네트워크를 쓰지 않는다. 실행 전에 논리 호출 수와 최대 시도 수(재시도 포함)를 남은 하루 한도와 비교해 모자라면 아무것도 보내지 않는다.
+화면에는 공고 id, 항목 번호, 라벨·판정·사유 코드와 숫자만 낸다. 모델이 쓴 이유와 오류 내용은 출력하지 않는다.
 """
 import argparse
 import copy
@@ -21,12 +28,22 @@ from collections import Counter
 from pathlib import Path
 
 from core import job_gate as gate
+from core.job_gate_ai import make_llm_judge
 from core.job_gate_mock import make_label_mock
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.schemas import DISPLAY_LABELS
+from tools.ai_common import AiSetupError, prepare_session
 
 REPO = Path(__file__).resolve().parents[1]
 CASES_JSON = REPO / "data" / "raw" / "eval_cases.json"
 DEFAULT_SET = "dev"  # 확인셋(holdout)은 기본으로 돌리지 않는다 (6-4)
+SAMPLE_CASES_JSON = REPO / "data" / "sample-jobs" / "gate_sample_cases.json"
+SAMPLE_EXPECTED_JSON = REPO / "tests" / "fixtures" / "job_gate_sample_expected.json"
+RESULTS_DIR = REPO / "data" / "results"  # 사용량 기록과 게이트 캐시(커밋하지 않음)
+SAMPLE_NOTICE = (
+    "무료 티어로 보낸 입력은 공급자가 제품 개선에 쓰고 사람이 읽을 수 있다. 이 실행은 샘플 공고의 업무 문장만 보낸다. "
+    "지원자 정보는 보내지 않는다 (정책 16장)."
+)
 SAME = {"match", "adjacent"}            # 사용자에게 정상 평가로 가는 판정
 LOWER = {"mismatch", "out_of_scope"}    # 아래 그룹으로 내려가는 판정
 
@@ -119,7 +136,7 @@ def show(label):
 def evaluate(set_name, use_ai=False, verbose=False, path=None):
     """mock으로 세트를 돌려 지표를 출력하고 (지표, 행, AI 라벨 목록 밖 사건)을 돌려준다."""
     if use_ai:
-        raise NotImplementedError("실제 AI는 아직 연결하지 않았다 (job-gate.md 8장 보류). mock으로 돌린다.")
+        raise NotImplementedError("개발셋·확인셋의 실제 AI 평가는 이번 범위 밖이다 (job-gate.md 8장, 6-5). mock으로 돌린다.")
     desired, cases, skipped = load(set_name, path)
     dic = gate.Dictionary()
     rows, events = [], []
@@ -174,15 +191,208 @@ def evaluate(set_name, use_ai=False, verbose=False, path=None):
     return m, rows, events
 
 
+# ---------------------------------------------------------------- 샘플 6건 (정책 7-1, 6-5)
+
+CATEGORY_AI = "AI 판단 오류"
+CATEGORY_RULE = "규칙 확정 오류"
+CATEGORY_CANDIDATE = "후보 탐색 누락"
+CATEGORY_FAILED = "호출 실패"
+CATEGORIES = (CATEGORY_AI, CATEGORY_RULE, CATEGORY_CANDIDATE, CATEGORY_FAILED)  # 정답 불확실은 사람이 정한다
+
+
+def load_sample(cases_path=None, expected_path=None):
+    """(희망 직무군, 샘플 공고 목록). 원문 파일과 기대 판정 fixture를 번호로 짝짓는다. 어긋나면 ValueError, 원문 파일이 없으면 FileNotFoundError."""
+    cases_path, expected_path = Path(cases_path or SAMPLE_CASES_JSON), Path(expected_path or SAMPLE_EXPECTED_JSON)
+    if not cases_path.exists():
+        raise FileNotFoundError(f"샘플 공고 원문 파일이 없다: {cases_path} (팀 Drive에서 받아 넣는다. 커밋하지 않는 파일)")
+    expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    raw = {c["no"]: c for c in json.loads(cases_path.read_text(encoding="utf-8"))["cases"]}
+    cases = []
+    for exp in expected["cases"]:
+        r = raw.get(exp["no"])
+        if r is None:
+            raise ValueError(f"샘플 원문 파일에 {exp['no']}번 공고가 없다")
+        if r["company"] != exp["company"]:
+            raise ValueError(f"{exp['no']}번: 원문 파일과 기대 판정 fixture의 회사가 다르다")
+        kept = [it for it in r["items"] if not it.get("exclude")]
+        if len(kept) != len(exp["item_labels"]):
+            raise ValueError(f"{exp['no']}번: 업무 항목 수가 기대 판정 fixture와 다르다")
+        cases.append({
+            "id": f"sample-{exp['no']}", "no": exp["no"], "job_title": r["job_title"], "position": r["position"], "items": r["items"],
+            "expected_gate": exp["expected"]["gate"], "expected_core": exp["expected"]["core_family"],
+            "expected_labels": exp["item_labels"],
+        })
+    return expected["desired_family"], cases
+
+
+def _recording(judge, requests):
+    def wrapped(request):
+        requests.append(request)  # 호출을 시도한 요청. 실패해도 센다
+        return judge(request)
+    return wrapped
+
+
+def count_ai_calls(cases, desired, dic=None):
+    """정답 라벨을 돌려주는 mock으로 같은 입력을 돌려 AI 호출(논리 호출) 수를 센다. 실제 AI가 다른 라벨을 고르면 달라질 수 있다."""
+    dic = dic or gate.Dictionary()
+    total = 0
+    for c in cases:
+        requests = []
+        run(c, desired, _recording(make_label_mock(c["expected_labels"]), requests), dic)
+        total += len(requests)
+    return total
+
+
+def _item_category(item_index, expected, requests):
+    mine = [r for r in requests if r["item_index"] == item_index]
+    if any(expected not in r["allowed"] for r in mine):
+        return CATEGORY_CANDIDATE
+    return CATEGORY_AI if mine else CATEGORY_RULE
+
+
+def compare_sample(case, record, requests):
+    """샘플 1건의 기대와 결과를 비교해 불일치 목록 [(범주, 설명)]을 돌려준다. 정답지는 고치지 않는다."""
+    problems = []
+    got = [it["label"] for it in record["items"]]
+    for it in record["items"]:
+        want = case["expected_labels"][it["index"]]
+        if it["label"] != want:
+            problems.append((_item_category(it["index"], want, requests), f"항목 {it['index'] + 1} {show(it['label'])} (기대 {show(want)})"))
+    if len(got) != len(case["expected_labels"]):
+        problems.append((CATEGORY_RULE, f"항목 수 {len(got)} (기대 {len(case['expected_labels'])})"))
+    if not problems:  # 항목 라벨이 모두 같은데 위 단계의 결과가 다르면 항목 집계·판정 규칙의 문제다
+        for what, g, w in (("판정", record["result"], case["expected_gate"]), ("핵심 직무군", record["core_family"], case["expected_core"]),
+                           ("사유 코드", record["reason_code"], None), ("경고 코드", record["warnings"], [])):
+            if g != w:
+                problems.append((CATEGORY_RULE, f"{what} {g} (기대 {w})"))
+    return problems
+
+
+def run_sample(cases, desired, judge_for_case):
+    """샘플을 차례로 돌린다. 한 공고의 호출 실패는 그 공고만 실패로 두고 이어가고, 한도 소진은 남은 공고를 시작하지 않고 멈춘다.
+
+    (행 목록, 중단 여부)를 돌려준다. 행: case, record(실패면 None), requests, error(범주 이름 또는 None), problems.
+    """
+    dic = gate.Dictionary()
+    rows, stopped = [], False
+    for c in cases:
+        requests = []
+        row = {"case": c, "record": None, "requests": requests, "error": None, "problems": []}
+        try:
+            row["record"] = run(c, desired, _recording(judge_for_case(c), requests), dic)
+            row["problems"] = compare_sample(c, row["record"], requests)
+        except LLMQuotaExceeded:
+            row["error"], stopped = "한도 소진", True
+        except LLMStageError:
+            row["error"] = "AI 호출 실패"
+            row["problems"] = [(CATEGORY_FAILED, "AI 호출 실패")]
+        rows.append(row)
+        if stopped:
+            break
+    return rows, stopped
+
+
+def report_sample(rows, total_cases, mode, verbose=False):
+    """샘플 결과를 출력하고 지표 dict를 돌려준다. 공고 id·코드·숫자만 낸다."""
+    done = [r for r in rows if r["record"] is not None]
+    m = {"cases": total_cases, "ran": len(rows), "done": len(done), "failed": sum(1 for r in rows if r["error"]),
+         "all_ok": 0, "result_ok": 0, "core_ok": 0, "items_ok": 0, "items_total": 0, "calls": 0, "categories": Counter()}
+    print(f"\n=== sample ({mode}) | 설정값 {gate.cfg.CONFIG_VERSION} ===")
+    for r in rows:
+        c, rec = r["case"], r["record"]
+        m["calls"] += len(r["requests"])
+        for cat, _ in r["problems"]:
+            m["categories"][cat] += 1
+        if rec is None:
+            print(f"[{c['id']}] 실패: {r['error']} (AI 호출 {len(r['requests'])}회 시도)")
+            continue
+        n_ok = sum(it["label"] == c["expected_labels"][it["index"]] for it in rec["items"])
+        m["items_ok"] += n_ok
+        m["items_total"] += len(c["expected_labels"])
+        m["result_ok"] += rec["result"] == c["expected_gate"]
+        m["core_ok"] += rec["core_family"] == c["expected_core"]
+        m["all_ok"] += not r["problems"]
+        print(f"[{c['id']}] 판정 {show(rec['result'])}(기대 {show(c['expected_gate'])}) | 핵심 직무군 {show(rec['core_family']) if rec['core_family'] else '-'}"
+              f"(기대 {show(c['expected_core'])}) | 항목 라벨 {n_ok}/{len(c['expected_labels'])} | 사유 {rec['reason_code'] or '-'} 경고 {rec['warnings'] or '-'}"
+              f" | AI 호출 {len(r['requests'])}회 | {'일치' if not r['problems'] else '불일치'}")
+        for cat, text in r["problems"]:
+            print(f"   X [{cat}] {text}")
+        if verbose:
+            for it in rec["items"]:
+                print(f"   {'O' if it['label'] == c['expected_labels'][it['index']] else 'X'} 항목 {it['index'] + 1} {show(it['label'])}"
+                      f" ({'AI' if any(s['source'] == 'ai' for s in it['subtasks']) else '규칙'})")
+    skipped = total_cases - len(rows)
+    print(f"\n공고 전체 일치 {m['all_ok']}/{total_cases} (호출이 끝난 공고만 분모: {m['all_ok']}/{m['done']})"
+          f"{f', 시작하지 못한 공고 {skipped}건' if skipped else ''}")
+    print(f"판정 일치 {m['result_ok']}/{total_cases} (끝난 공고만 {m['result_ok']}/{m['done']}), 핵심 직무군 일치 {m['core_ok']}/{total_cases}, "
+          f"항목 라벨 일치 {m['items_ok']}/{m['items_total']}")
+    print(f"AI 호출(논리) {m['calls']}회, AI 실패 {m['failed']}건")
+    if m["categories"]:
+        print("불일치 원인(자동 분류): " + ", ".join(f"{cat} {m['categories'][cat]}" for cat in CATEGORIES if m["categories"][cat])
+              + " | 정답 불확실은 사람이 판단해 기록한다 (정책 6-5)")
+    return m
+
+
+def run_sample_mock(verbose=False, cases_path=None, expected_path=None):
+    desired, cases = load_sample(cases_path, expected_path)
+    rows, _ = run_sample(cases, desired, lambda c: make_label_mock(c["expected_labels"]))
+    return report_sample(rows, len(cases), "mock: 정답 라벨을 돌려준다", verbose), rows
+
+
+def run_sample_ai(args, cases_path=None, expected_path=None):
+    """샘플 6건을 실제 Gemini로 돌린다. 공고 정보만 보낸다. 호출 전에 약관 동의, 설정, 하루 예산(최대 시도 수)을 모두 점검한다."""
+    try:
+        desired, cases = load_sample(cases_path, expected_path)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"실행할 수 없다: {e}", file=sys.stderr)
+        return 2
+    logical = count_ai_calls(cases, desired)
+    attempts = logical * (1 + MAX_RETRIES)  # 재시도 때문에 한 논리 호출이 최대 이만큼 시도된다. 실패한 시도도 한도에 센다
+    notice = SAMPLE_NOTICE + f"\n예상 호출: 논리 {logical}회, 최대 시도 {attempts}회(재시도 {MAX_RETRIES}회 포함)."
+    try:
+        session = prepare_session(args, notice=notice, needed_calls=attempts, results_dir=RESULTS_DIR, cache_dir_name="gate",
+                                  env_loader=load_env, client_cls=GeminiClient)
+    except AiSetupError as e:
+        print(e, file=sys.stderr)
+        return e.code
+    settings, usage = session.settings, session.usage
+    print(f"=== 게이트 샘플 {len(cases)}건 (실제 AI: {settings.model}, 실행 {usage.run_id}, 생성 설정 {session.gemini.config_id}, "
+          f"논리 호출 예상 {logical}회, 최대 시도 {attempts}회, 오늘 이미 사용 {session.calls_before}/{settings.rpd}"
+          f"{', 새 캐시' if args.fresh_cache else ''}) ===")
+    rows, stopped = run_sample(cases, desired, lambda c: make_llm_judge(session.client, c["id"]))
+    m = report_sample(rows, len(cases), f"AI {settings.model}", args.verbose)
+    t, after = usage.run_totals(), usage.calls_today(settings.model)
+    print(f"이번 실행({usage.run_id}) 시도 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
+          f"오늘 누적 {after}/{settings.rpd} (모델 {settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
+    if stopped:
+        print("한도 소진으로 중간에 멈췄다. 태평양 시간 자정 이후에 이어서 하라.", file=sys.stderr)
+        return 3
+    return 0 if m["all_ok"] == len(cases) else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--set", choices=["dev", "holdout", "all"], default=DEFAULT_SET)
-    p.add_argument("--ai", action="store_true", help="실제 AI (아직 연결하지 않음, job-gate.md 8장 보류)")
+    p.add_argument("--set", choices=["sample", "dev", "holdout", "all"], default=DEFAULT_SET)
+    p.add_argument("--ai", action="store_true", help="실제 AI로 샘플 6건을 실행 (--set sample에서만, 공고 정보만 보낸다)")
+    p.add_argument("--accept-free-tier-terms", action="store_true", help="무료 티어 입력이 제품 개선에 쓰일 수 있음에 동의")
+    p.add_argument("--fresh-cache", action="store_true", help="이번 실행만의 새 캐시를 쓴다(모델 비교·재현성 확인용)")
+    p.add_argument("--model", help=".env의 GEMINI_MODEL을 덮어쓴다")
+    p.add_argument("--rpm", type=int, help=".env의 GEMINI_RPM을 덮어쓴다")
+    p.add_argument("--rpd", type=int, help=".env의 GEMINI_RPD를 덮어쓴다")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
-    if args.ai:
-        print("실제 AI는 아직 연결하지 않았다 (job-gate.md 8장 보류). --ai 없이 mock으로 돌린다.", file=sys.stderr)
+    if args.ai and args.set != "sample":
+        print("실제 AI는 샘플 6건(--set sample)에서만 돌린다. 개발셋·확인셋의 실제 AI 평가는 이번 범위 밖이다 (job-gate.md 8장, 6-5). 아무것도 보내지 않았다.", file=sys.stderr)
         sys.exit(2)
+    if args.set == "sample":
+        if args.ai:
+            sys.exit(run_sample_ai(args))
+        try:
+            metrics, _ = run_sample_mock(args.verbose)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"실행할 수 없다: {e}", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0 if metrics["all_ok"] == metrics["cases"] else 1)
     if not CASES_JSON.exists():
         print(f"정답 파일이 없다: {CASES_JSON} (팀 Drive에서 받아 data/raw/에 넣는다. 커밋하지 않는 파일)", file=sys.stderr)
         sys.exit(2)

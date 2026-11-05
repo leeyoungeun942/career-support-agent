@@ -157,12 +157,13 @@ def test_main_reports_a_missing_answer_file(tmp_path, monkeypatch, capsys):
     assert exit_info.value.code == 2 and "정답 파일이 없다" in capsys.readouterr().err
 
 
-def test_ai_option_exits_with_a_message_and_never_calls_anything(capsys):
+def test_ai_option_outside_the_sample_set_exits_with_a_message_and_never_calls_anything(capsys):
+    """개발셋·확인셋의 실제 AI 평가는 이번 범위 밖이다 (정책 8장, 6-5). 실제 AI는 --set sample에서만 돈다."""
     with pytest.raises(SystemExit) as exit_info:
         eval_gate.main(["--ai"])
     assert exit_info.value.code == 2
-    assert "아직 연결하지 않았다" in capsys.readouterr().err
-    with pytest.raises(NotImplementedError):
+    assert "샘플 6건" in capsys.readouterr().err
+    with pytest.raises(NotImplementedError, match="범위 밖"):
         eval_gate.evaluate("dev", use_ai=True)
 
 
