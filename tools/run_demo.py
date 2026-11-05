@@ -9,6 +9,8 @@
     python -m tools.run_demo --select sample-3 --save-profile-evidence   # 파일에 프로필 인용도 담는다 (가상 프로필 한정)
     python -m tools.run_demo --select sample-3 --draft cover_letter   # 고른 공고로 자소서(cover_letter) 또는 포트폴리오(portfolio) 초안을 mock으로 만든다
     python -m tools.run_demo --select sample-3 --draft portfolio --save-draft   # 초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)
+    python -m tools.run_demo --select sample-3 --draft cover_letter --ai --accept-free-tier-terms --model ... --rpm ... --rpd ...
+                                                  # 초안 작성 1회만 실제 Gemini. 자격요건과 게이트는 mock (가상 프로필과 샘플 공고만)
     python -m tools.run_demo --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
                                                   # 자격요건 단계만 실제 Gemini. 게이트의 AI 자리는 mock이다 (실제 연결은 이슈 #12)
 
@@ -18,7 +20,7 @@
 결과는 data/results/pipeline/<run_id>.json에 저장한다(커밋하지 않음). 기본으로는 프로필 원문 인용을 빼고 저장한다.
 선택 파일은 data/results/selection/<run_id>-<job_id>.json이다. 평가를 마치지 못한 공고는 선택할 수 없고, 불일치·미충족 공고는 경고 문구와 함께 선택할 수 있다.
 --ai의 안내, 동의, 하루 호출 예산 점검은 tools.eval_eligibility와 같다. 공고 원문은 data/sample-jobs/eligibility_sample_postings.json에서 읽는다.
---draft는 mock만 된다(실제 AI 연결은 별도 승인 뒤, docs/policies/application-writing.md). 초안은 기본으로 저장하지 않고, 입력(WriterInput)은 어떤 경우에도 저장하지 않는다.
+--draft는 기본 mock이다. --draft --ai는 초안 작성 호출 1회(재시도 포함 최대 4회)만 실제 Gemini로 보내고 자격요건과 게이트는 mock이다 (docs/policies/application-writing.md). 초안은 기본으로 저장하지 않고, 입력(WriterInput)은 어떤 경우에도 저장하지 않는다.
 화면에는 순위, 판정, 코드가 만든 사유 문구를 낸다. 프로필 인용, 공고 원문 전체, 모델 출력과 오류 내용은 출력하지 않는다.
 """
 import argparse
@@ -29,7 +31,7 @@ from pathlib import Path
 
 from core.job_gate_mock import make_label_mock
 from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
-from core.llm_client import LLMStageError
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
 from core.pipeline_run import PipelineRun, ProfileRef
@@ -37,6 +39,7 @@ from core.schemas import DISPLAY_LABELS
 from core.selection import JOB_ID_PATTERN, SelectedJob, SelectionRefused, select_job
 from core.writer_input import JobInfo, WriterInputError, build_writer_input
 from tools import eval_eligibility as ev
+from tools.ai_common import AiSetupError, prepare_session
 
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ev.RESULTS_DIR
@@ -256,13 +259,16 @@ def _draft(run: PipelineRun, profile, args) -> int:
     try:
         selected = select_job(run, args.select, include_profile_evidence=True)
         wi = build_writer_input(selected, profile, _job_info(args.select, args.gate_cases))
-        answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
-        if args.select not in answers:
-            print(f"초안을 만들 수 없다: mock 초안이 {sorted(answers)}에만 있다", file=sys.stderr)
-            return EXIT_REFUSED
-        draft = write_application(wi, make_writer_mock(answers), args.draft, mode="mock")
+        client = getattr(args, "writer_client", None)
+        if client is None:  # mock: fixture의 초안을 돌려준다
+            answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
+            if args.select not in answers:
+                print(f"초안을 만들 수 없다: mock 초안이 {sorted(answers)}에만 있다", file=sys.stderr)
+                return EXIT_REFUSED
+            client = make_writer_mock(answers)
+        draft = write_application(wi, client, args.draft, allow_external_profile=getattr(args, "writer_client", None) is not None, mode=getattr(args, "writer_mode", "mock"))
         path = save_draft(draft, RESULTS_DIR / "drafts") if args.save_draft else None
-    except (SelectionRefused, WriterInputError, DraftError, LLMStageError, ValueError, FileExistsError) as e:
+    except (SelectionRefused, WriterInputError, DraftError, LLMStageError, LLMQuotaExceeded, PermissionError, ValueError, FileExistsError) as e:
         print(f"초안을 만들지 못했다: {type(e).__name__}: {e}", file=sys.stderr)  # 메시지에는 초안·프로필 내용이 없다
         return EXIT_REFUSED
     print("\n".join(render_draft(draft, path)))
@@ -333,6 +339,31 @@ def run_ai(args) -> int:
     return code
 
 
+def run_draft_ai(args) -> int:
+    """초안 작성 1회만 실제 Gemini로 보낸다. 자격요건과 게이트는 mock이다(가상 프로필과 샘플 공고만 나간다, 정책 5장).
+
+    동의, 설정, 하루 예산(재시도 포함 최대 시도)을 점검한 뒤에만 보낸다. 하나라도 안 되면 아무것도 보내지 않는다.
+    """
+    try:
+        build_scenario(args.gate, args.gate_cases)
+        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=1 + MAX_RETRIES, results_dir=RESULTS_DIR,
+                                  cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient)
+    except AiSetupError as e:
+        print(e, file=sys.stderr)
+        return e.code
+    except (ScenarioError, FileNotFoundError) as e:
+        print(f"실행할 수 없다: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    args.writer_client, args.writer_mode = session.client, "ai"
+    print(f"=== 초안 작성 실제 AI: {session.settings.model}, 실행 {session.usage.run_id}, 오늘 이미 사용 {session.calls_before}/{session.settings.rpd} "
+          f"(자격요건과 게이트는 mock) ===")
+    code = run_mock(args)
+    t, after = session.usage.run_totals(), session.usage.calls_today(session.settings.model)
+    print(f"이번 실행({session.usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
+          f"오늘 누적 {after}/{session.settings.rpd} (모델 {session.settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
+    return code
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--ai", action="store_true", help="자격요건 단계를 실제 Gemini로 실행 (가상 프로필과 샘플 공고만)")
@@ -357,8 +388,10 @@ def main(argv=None):
         p.error("--draft는 --select와 함께 쓴다")
     if args.save_draft and not args.draft:
         p.error("--save-draft는 --draft와 함께 쓴다")
-    if args.draft and (args.ai or args.real_profile):
-        p.error("--draft는 아직 mock만 된다 (실제 AI 연결은 별도 승인 뒤)")
+    if args.draft and args.real_profile:
+        p.error("--real-profile은 구현하지 않았다")
+    if args.draft and args.ai:
+        sys.exit(run_draft_ai(args))
     if args.ai or args.real_profile:
         sys.exit(run_ai(args))
     sys.exit(run_mock(args))

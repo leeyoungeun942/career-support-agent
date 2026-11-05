@@ -3,11 +3,11 @@ import json
 from pathlib import Path
 
 import pytest
-from pipeline_helpers import PROFILE, SAMPLES, run
+from pipeline_helpers import PROFILE, SAMPLES, Routing, main, run
 
 from agents import application_writer as aw
 from agents.application_writer import DraftError, make_writer_mock, write_application
-from core.llm_client import FakeClient, LLMStageError
+from core.llm_client import MAX_RETRIES, FakeClient, LLMQuotaExceeded, LLMResponse, LLMStageError
 from core.prompts import load_prompt
 from core.selection import select_job
 from core.writer_input import WriterInputError, build_writer_input
@@ -318,7 +318,7 @@ def test_save_draft_does_not_overwrite(tmp_path):
 @pytest.mark.parametrize("argv", [
     ["--draft", "cover_letter"],  # --select 없음
     ["--select", "sample-3", "--save-draft"],  # --draft 없음
-    ["--select", "sample-3", "--draft", "cover_letter", "--ai"],  # 아직 mock만
+    ["--select", "sample-3", "--draft", "cover_letter", "--real-profile"],  # 실제 프로필 경로는 없다
     ["--select", "sample-3", "--draft", "resume"],
 ])
 def test_draft_option_misuse_is_refused_before_anything_runs(argv, capsys):
@@ -337,3 +337,94 @@ def test_draft_for_a_job_without_mock_answers_is_refused(tmp_path, capsys, monke
 def test_job_info_reads_company_from_fixtures_and_works_without_the_local_gate_file(tmp_path):
     info = demo._job_info("sample-3", tmp_path / "missing.json")
     assert info.company_name and info.job_title is None and info.main_tasks == []
+
+
+# ---------------------------------------------------------------- --draft --ai: 초안 작성 호출만 실제로 (가짜 클라이언트, 네트워크 없음)
+
+class DraftRouting(Routing):
+    """GeminiClient 대신 쓰는 가짜: 초안 작성 단계 요청에만 mock 초안을 돌려준다. 다른 단계가 오면 실패한다."""
+
+    answer_override = None
+
+    def __init__(self, settings, usage=None):
+        super().__init__(settings, usage)
+        self.usage = usage
+        self.requests = []
+        self.answers = {(f"write_{kind}", "sample-3"): MOCK_ANSWERS["sample-3"][kind] for kind in aw.KINDS}
+
+    def _complete(self, request):
+        self.requests.append(request)
+        assert request.stage.startswith("write_"), f"초안 작성이 아닌 단계를 보냈다: {request.stage}"
+        data = DraftRouting.answer_override or self.answers[(request.stage, request.job_id)]
+        self.usage.record(request, model=self.model, input_tokens=11, output_tokens=5)
+        return LLMResponse(data=data, input_tokens=11, output_tokens=5)
+
+
+@pytest.fixture
+def draft_ai(results, monkeypatch):
+    DraftRouting.answer_override, DraftRouting.instances = None, []
+    monkeypatch.setattr(demo, "load_env", lambda: {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-test", "GEMINI_RPM": "5", "GEMINI_RPD": "20"})
+    created = []
+
+    def make(settings, usage=None):
+        created.append(DraftRouting(settings, usage))
+        return created[-1]
+
+    monkeypatch.setattr(demo, "GeminiClient", make)
+    return created
+
+
+AI = ["--ai", "--accept-free-tier-terms", "--gate", "injected", "--select", "sample-3"]
+
+
+def test_draft_ai_without_consent_sends_nothing(draft_ai, monkeypatch, capsys):
+    monkeypatch.setattr(demo, "GeminiClient", lambda *a, **k: pytest.fail("동의 없이 클라이언트를 만들었다"))
+    assert main("--ai", "--gate", "injected", "--select", "sample-3", "--draft", "cover_letter") == 2
+    assert "--accept-free-tier-terms" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", aw.KINDS)
+def test_draft_ai_sends_only_the_writer_call_and_labels_it_ai(draft_ai, results, capsys, kind):
+    assert main(*AI, "--draft", kind, "--save-draft") == 0
+    out = capsys.readouterr().out
+    client = draft_ai[0]
+    assert [r.stage for r in client.requests] == [f"write_{kind}"]  # 자격요건·게이트는 보내지 않는다
+    assert client.requests[0].contains_profile is True
+    assert "writer: ai (m-test)" in out and "자격요건과 게이트는 mock" in out and "이번 실행" in out
+    files = list((results / "drafts").glob("*.json"))
+    assert len(files) == 1 and json.loads(files[0].read_text(encoding="utf-8"))["meta"]["mode"] == "ai"
+    assert not (results / "llm_cache" / "profile").exists()  # 프로필이 든 요청은 디스크 캐시에 남지 않는다
+    assert [r.get("ok", True) for r in map(json.loads, (results / "llm_usage.jsonl").read_text(encoding="utf-8").splitlines())] == [True]
+
+
+def test_draft_ai_checks_the_budget_for_one_call_with_retries(draft_ai, capsys):
+    main(*AI, "--draft", "cover_letter")
+    assert Routing.needed == 1 + MAX_RETRIES
+
+
+def test_draft_ai_stops_before_any_call_when_budget_is_short(draft_ai, monkeypatch, capsys):
+    class NoBudget(DraftRouting):
+        def ensure_budget(self, needed):
+            raise LLMQuotaExceeded("오늘 남은 호출 0회, 필요한 호출 4회")
+
+    monkeypatch.setattr(demo, "GeminiClient", lambda settings, usage=None: NoBudget(settings, usage))
+    assert main(*AI, "--draft", "cover_letter") == 2
+    assert "시작하지 않았다" in capsys.readouterr().err
+
+
+def test_draft_ai_rejects_a_model_draft_that_breaks_the_rules_and_saves_nothing(draft_ai, results, capsys):
+    DraftRouting.answer_override = response(("motivation", "SECRET_MODEL_TEXT 인턴 경험이 있습니다.", ["X9"]))
+    assert main(*AI, "--draft", "cover_letter", "--save-draft") == 2
+    captured = capsys.readouterr()
+    assert "DraftError" in captured.err and "SECRET_MODEL_TEXT" not in captured.out + captured.err
+    assert not (results / "drafts").exists()
+
+
+def test_draft_ai_quota_exhaustion_during_the_call_is_reported_not_traced(draft_ai, monkeypatch, capsys):
+    class Exhausted(DraftRouting):
+        def _complete(self, request):
+            raise LLMQuotaExceeded("일일 한도")
+
+    monkeypatch.setattr(demo, "GeminiClient", lambda settings, usage=None: Exhausted(settings, usage))
+    assert main(*AI, "--draft", "cover_letter") == 2
+    assert "Traceback" not in capsys.readouterr().err
