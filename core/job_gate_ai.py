@@ -68,6 +68,7 @@ def build_prompt(request: dict, body: str) -> str:
         body,
         labels=labels,
         families="\n".join(_family_text(f) for f in shown),
+        supported=", ".join(cfg.JOB_FAMILIES[f]["name"] for f in request["families"]),  # 공통 기준 1을 따져 볼 지원 직무군 전체
         level_note=LEVEL_NOTES["item" if is_item else "subtask"],
         subtask=_data(request["text"]),
         item="(위와 같다)" if is_item else _data(request["item_text"]),

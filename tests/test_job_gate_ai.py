@@ -198,13 +198,34 @@ def test_every_allowed_special_label_code_and_response_field_appears_in_the_prom
 
 
 def test_template_placeholders_are_exactly_the_ones_the_adapter_fills():
-    assert set(re.findall(r"\{\{(\w+)\}\}", BODY)) == {"labels", "families", "level_note", "subtask", "item", "others"}
+    assert set(re.findall(r"\{\{(\w+)\}\}", BODY)) == {"labels", "families", "supported", "level_note", "subtask", "item", "others"}
+
+
+def test_prompt_lists_every_supported_family_so_the_common_criterion_can_be_checked():
+    """후보가 한 직무군으로 좁혀진 요청에서도 둘 이상의 직무군이 하는 일인지 따져 볼 수 있어야 한다 (정책 3-2 공통 기준 1)."""
+    narrow = prompt_of(request(candidates=["JF_SERVICE_PLANNING"], allowed=["JF_SERVICE_PLANNING", *SPECIALS]))
+    for fid in cfg.active_families():
+        assert cfg.JOB_FAMILIES[fid]["name"] in narrow
+    assert cfg.JOB_FAMILIES["JF_SALES"]["definition"] not in narrow  # 이름만 주고 정의는 후보에게만 준다
+
+
+def test_common_criterion_is_checked_before_picking_a_family():
+    """정책 5-2 4단계 (2026-11-05): 공통 기준이 먼저고, 한 직무군의 정의에 나온다는 이유만으로 그 직무군으로 정하지 않는다."""
+    first_common = BODY.index("먼저 공통인지 확인한다")
+    pick_family = BODY.index("공통이 아니면")
+    assert first_common < pick_family < BODY.index("`out_of_scope`(범위 밖)") < BODY.index("`mixed`(혼합)")
+    assert "둘 이상이 함께 하는 일" in BODY and "이유만으로" in BODY
 
 
 def test_prompt_has_a_version_line_and_the_judging_criteria_from_the_policy():
     assert VERSION
     assert "결과물과 책임 범위" in BODY and "직무명" in BODY and "서비스 운영" in BODY
     assert "판단이 어려우면 `common`" in BODY and "근거 없이 `out_of_scope`를 고르지 않는다" in BODY  # 정책 3-2: 확신이 없으면 제외하지 않는다
+
+
+@pytest.mark.policy_contract
+def test_policy_states_the_common_first_order_the_prompt_follows():
+    assert "공통 기준(3-2)이 먼저다" in POLICY and "한 직무군의 정의에 나온다는 이유만으로" in POLICY
 
 
 @pytest.mark.policy_contract
