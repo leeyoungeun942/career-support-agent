@@ -31,6 +31,7 @@ from core import job_gate as gate
 from core.job_gate_ai import make_llm_judge
 from core.job_gate_mock import make_label_mock
 from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
+from core.prompts import load_prompt, load_prompt_file, prompt_hash
 from core.schemas import DISPLAY_LABELS
 from tools.ai_common import AiSetupError, prepare_session
 
@@ -389,6 +390,11 @@ def run_sample_ai(args, cases_path=None, expected_path=None):
     except AiSetupError as e:
         print(e, file=sys.stderr)
         return e.code
+    try:
+        prompt = load_prompt_file(args.prompt) if getattr(args, "prompt", None) else load_prompt("gate_label")  # 실험 변형은 prompts/ 아래 파일만 (정책 6-5)
+    except (ValueError, OSError) as e:
+        print(f"실행할 수 없다: {e}. 아무것도 보내지 않았다.", file=sys.stderr)
+        return 2
     expected_calls, logical = ai_call_bounds(cases, desired)  # mock 예상은 상한이 아니다. 예산은 최대 논리 호출로 계산한다
     attempts = logical * (1 + MAX_RETRIES)  # 재시도 때문에 한 논리 호출이 최대 이만큼 시도된다. 실패한 시도도 한도에 센다
     notice = SAMPLE_NOTICE + f"\n예상 호출: mock 예상 논리 {expected_calls}회, 최대 논리 {logical}회, 최대 시도 {attempts}회(재시도 {MAX_RETRIES}회 포함)."
@@ -400,9 +406,10 @@ def run_sample_ai(args, cases_path=None, expected_path=None):
         return e.code
     settings, usage = session.settings, session.usage
     print(f"=== 게이트 샘플 {len(cases)}건 (실제 AI: {settings.model}, 실행 {usage.run_id}, 생성 설정 {session.gemini.config_id}, "
+          f"프롬프트 {prompt[0]}(해시 {prompt_hash(prompt[1])}), "
           f"논리 호출 예상 {expected_calls}회, 최대 논리 {logical}회, 최대 시도 {attempts}회, 오늘 이미 사용 {session.calls_before}/{settings.rpd}"
           f"{', 새 캐시' if args.fresh_cache else ''}) ===")
-    rows, stopped = run_sample(cases, desired, lambda c: make_llm_judge(session.client, c["id"]))
+    rows, stopped = run_sample(cases, desired, lambda c: make_llm_judge(session.client, c["id"], prompt))
     m = report_sample(rows, len(cases), f"AI {settings.model}", args.verbose)
     t, after = usage.run_totals(), usage.calls_today(settings.model)
     print(f"호출 비교: mock 예상 논리 {expected_calls}회 / 최대 논리 {logical}회 / 실제 논리 {m['calls']}회 / 실제 시도 {t['calls']}회(최대 시도 {attempts}회).")
@@ -420,6 +427,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--set", choices=["sample", "dev", "holdout", "all"], default=DEFAULT_SET)
     p.add_argument("--ai", action="store_true", help="실제 AI로 샘플 6건을 실행 (--set sample에서만, 공고 정보만 보낸다)")
+    p.add_argument("--prompt", help="실험용 프롬프트 파일(prompts/ 아래 .md). --ai에서만. 비우면 prompts/gate_label.md (정책 6-5)")
     p.add_argument("--accept-free-tier-terms", action="store_true", help="무료 티어 입력이 제품 개선에 쓰일 수 있음에 동의")
     p.add_argument("--fresh-cache", action="store_true", help="이번 실행만의 새 캐시를 쓴다(모델 비교·재현성 확인용)")
     p.add_argument("--model", help=".env의 GEMINI_MODEL을 덮어쓴다")
@@ -427,6 +435,9 @@ def main(argv=None):
     p.add_argument("--rpd", type=int, help=".env의 GEMINI_RPD를 덮어쓴다")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
+    if args.prompt and not args.ai:
+        print("--prompt는 --ai에서만 쓴다(mock은 프롬프트를 쓰지 않는다). 아무것도 실행하지 않았다.", file=sys.stderr)
+        sys.exit(2)
     if args.ai and args.set != "sample":
         print("실제 AI는 샘플 6건(--set sample)에서만 돌린다. 개발셋·확인셋의 실제 AI 평가는 이번 범위 밖이다 (job-gate.md 8장, 6-5). 아무것도 보내지 않았다.", file=sys.stderr)
         sys.exit(2)

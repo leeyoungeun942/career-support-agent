@@ -130,12 +130,13 @@ def copies_posting(reason: str, request: dict) -> bool:
     return any(r[i:i + COPY_GUARD_CHARS] in src for i in range(len(r) - COPY_GUARD_CHARS + 1) for src in sources)
 
 
-def make_llm_judge(client: LLMClient, posting_id: str) -> Callable[[dict], dict]:
+def make_llm_judge(client: LLMClient, posting_id: str, prompt: tuple[str, str] | None = None) -> Callable[[dict], dict]:
     """공고 하나의 AiJudge를 만든다 (core.job_gate.AiJudge 형태: request -> {"label", "reason"}).
 
     client는 LLMClient(실제는 CachedClient로 감싼 GeminiClient, 테스트는 FakeClient)다. 호출마다 새로 묻고 다시 묻지 않는다.
+    prompt는 (version, 본문)이다. 비우면 기본 프롬프트(prompts/gate_label.md)를 쓴다. 실험 변형은 core.prompts.load_prompt_file로 읽어 넘긴다 (정책 6-5).
     """
-    version, body = load_prompt(STAGE)
+    version, body = prompt or load_prompt(STAGE)
     split_prompt(body)  # 구분이 없는 프롬프트는 호출 전에 알린다
 
     def judge(request: dict) -> dict:
