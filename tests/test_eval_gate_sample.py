@@ -3,12 +3,15 @@ import json
 import random
 import re
 import types
+from pathlib import Path
 
 import pytest
 
 from core import job_gate as gate
+from core import prompts
 from core.job_gate_mock import make_label_mock
 from core.llm_client import GeminiClient, LLMQuotaExceeded, LLMStageError, UsageLog
+from core.prompts import PROMPT_DIR, load_prompt, prompt_hash
 from tools import eval_gate
 
 AMBIGUOUS_A = [{"heading": "", "text": "회사의 다양한 업무를 지원하고 필요한 일을 수행"}, {"heading": "", "text": "기타 관련 업무 전반"}]
@@ -447,3 +450,66 @@ def test_run_sample_ai_never_reaches_the_budget_step_for_an_out_of_scope_input(a
     monkeypatch.setattr(eval_gate, "ai_call_bounds", lambda *a, **k: pytest.fail("범위 검사 전에 호출 수를 계산했다"))
     args = types.SimpleNamespace(accept_free_tier_terms=True, model=None, rpm=None, rpd=None, fresh_cache=False, verbose=False)
     assert eval_gate.run_sample_ai(args) == 2
+
+
+# ---------------------------------------------------------------- --prompt: 실험 프롬프트 파일 (정책 6-5, 이슈 #15)
+
+def make_prompt_dir(tmp_path):
+    root = tmp_path / "prompts"
+    (root / "experiments").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def write_variant(tmp_path, version="test-1", extra=""):
+    root = make_prompt_dir(tmp_path)
+    _, body = load_prompt("gate_label")
+    f = root / "experiments" / "gate_label_test.md"
+    f.write_text(f"version: {version}\n{body}{extra}", encoding="utf-8")
+    return root, f
+
+
+def usage_rows(results):
+    return [json.loads(line) for line in (results / "llm_usage.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_prompt_option_without_ai_is_refused(sample_files, capsys):
+    assert main("--set", "sample", "--prompt", str(PROMPT_DIR / "gate_label.md")) == 2
+    assert "--ai에서만" in capsys.readouterr().err
+
+
+def test_prompt_outside_the_prompt_dir_sends_nothing(ai_env, capsys):
+    outside = Path(eval_gate.SAMPLE_CASES_JSON)  # 공고 원문이 든 파일을 프롬프트로 지정하는 실수
+    assert main(*AI, "--prompt", str(outside)) == 2
+    err = capsys.readouterr().err
+    assert "아무것도 보내지 않았다" in err and FakeGemini.created == 0 and FakeGemini.called == []
+
+
+def test_variant_prompt_is_used_and_its_version_and_hash_are_recorded(ai_env, tmp_path, monkeypatch, capsys):
+    root, f = write_variant(tmp_path)
+    monkeypatch.setattr(eval_gate, "load_prompt_file", lambda p: prompts.load_prompt_file(p, root=root))
+    assert main(*AI, "--prompt", str(f)) == 0
+    out = capsys.readouterr().out
+    version, body = prompts.load_prompt_file(f, root=root)
+    assert f"프롬프트 test-1(해시 {prompt_hash(body)})" in out
+    rows = usage_rows(ai_env)
+    assert rows and {r["prompt_version"] for r in rows} == {"test-1"}
+
+
+def test_default_run_records_the_default_prompt_version_and_hash(ai_env, capsys):
+    assert main(*AI) == 0
+    version, body = load_prompt("gate_label")
+    assert f"프롬프트 {version}(해시 {prompt_hash(body)})" in capsys.readouterr().out
+    assert {r["prompt_version"] for r in usage_rows(ai_env)} == {version}
+
+
+def test_changing_the_variant_text_under_the_same_version_changes_the_recorded_hash_and_the_cache(ai_env, tmp_path, monkeypatch, capsys):
+    root, f = write_variant(tmp_path)
+    monkeypatch.setattr(eval_gate, "load_prompt_file", lambda p: prompts.load_prompt_file(p, root=root))
+    main(*AI, "--prompt", str(f))
+    first = capsys.readouterr().out
+    FakeGemini.called.clear()
+    _, f2 = write_variant(tmp_path, extra="\n한 줄을 더했다\n")  # 같은 버전 문자열, 다른 내용
+    main(*AI, "--prompt", str(f2))
+    second = capsys.readouterr().out
+    hashes = [re.search(r"해시 ([0-9a-f]{8})", t).group(1) for t in (first, second)]
+    assert hashes[0] != hashes[1] and FakeGemini.called  # 내용이 달라 캐시를 쓰지 못하고 다시 호출한다
