@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 MAP_CSV = REPO / "data" / "job_family_map.csv"
 
 class AiJudge(Protocol):
-    """AI 자리의 형태 (5-2의 4단계). 실제 AI 연결은 보류라 지금은 mock과 스텁만 쓴다 (job-gate.md 8장).
+    """AI 자리의 형태 (5-2의 4단계). 기본은 mock과 스텁이고, 실제 모델은 core/job_gate_ai.py의 어댑터가 같은 형태로 채운다 (job-gate.md 5-2 "AI 판별의 계약", 8장).
 
     request 키: level("subtask"/"item"), item_index, sub_index, text, item_text, other_items,
                 candidates, allowed, families
