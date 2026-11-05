@@ -104,7 +104,7 @@ def test_ai_request_carries_no_forbidden_inputs():
     """
     desired, cases = load_cases()
     dic = gate.Dictionary()
-    expected_keys = {"level", "item_index", "sub_index", "text", "item_text", "other_items", "candidates", "allowed", "families"}
+    expected_keys = {"level", "item_index", "sub_index", "text", "item_text", "other_items", "context_items", "candidates", "allowed", "families"}
     n_requests = 0
     for case in cases:
         captured = []
@@ -115,6 +115,7 @@ def test_ai_request_carries_no_forbidden_inputs():
 
         run_case(case, desired, recorder, dic)
         kept_texts = [(it.get("heading", "") + " " + it["text"]).strip() for it in case["items"] if not it.get("exclude")]
+        context_texts = [(it.get("heading", "") + " " + it["text"]).strip() for it in case["items"] if it.get("exclude")]
         for request in captured:
             n_requests += 1
             assert set(request) == expected_keys, (case["no"], set(request) ^ expected_keys)
@@ -124,6 +125,8 @@ def test_ai_request_carries_no_forbidden_inputs():
             for other in request["other_items"]:
                 assert other in kept_texts  # 나머지 항목은 원문으로만 준다 (라벨 없음)
             assert request["item_text"] == kept_texts[request["item_index"]]
+            assert request["context_items"] == context_texts  # 회사 소개 문장(exclude)은 항목이 아니라 참고 문맥으로만 간다 (5-2)
+            assert not set(request["context_items"]) & set(request["other_items"])  # 항목으로 세지 않는다
             assert request["text"] in request["item_text"]
     assert n_requests > 0
 

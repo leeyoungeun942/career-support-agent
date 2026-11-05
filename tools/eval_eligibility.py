@@ -20,23 +20,14 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-from core.llm_client import (
-    CachedClient,
-    GeminiClient,
-    GeminiSettings,
-    LLMConfigError,
-    LLMQuotaExceeded,
-    LLMStageError,
-    UsageLog,
-    load_env,
-)
+from core.llm_client import GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import assess_eligibility
 from core.rules import ProfileEvidenceError, rank_jobs
 from core.schemas import DISPLAY_LABELS, EligibilityProfile, JobGateResult
+from tools.ai_common import AiSession, AiSetupError, prepare_session
 
 REPO = Path(__file__).resolve().parents[1]
 FIXTURES = REPO / "tests" / "fixtures"
@@ -275,58 +266,29 @@ def run_mock(verbose=False):
     return report(rows, results, gates, verbose), rows
 
 
-class AiSetupError(Exception):
-    """실제 AI 실행을 시작할 수 없다. code는 프로세스 종료 코드다. 메시지에는 키나 입력 내용이 없다."""
-
-    def __init__(self, message: str, code: int = 2):
-        super().__init__(message)
-        self.code = code
-
-
-@dataclass
-class AiSession:
-    """준비를 마친 실제 AI 실행: 설정, 사용량 기록, 캐시를 거치는 클라이언트, 공고 원문."""
-
-    settings: GeminiSettings
-    usage: UsageLog
-    gemini: GeminiClient
-    client: CachedClient
-    postings: dict[str, str]
-    calls_before: int
-
-
 def prepare_ai(args, job_ids: list[str], results_dir: Path | None = None) -> AiSession:
     """--ai 실행의 공통 준비: 안내, 동의, 설정, 공고 원문 파일, 하루 호출 예산(공고당 요건 추출 1 + 근거 찾기 1)을 점검한다.
 
-    하나라도 안 되면 아무것도 보내지 않고 AiSetupError를 낸다. 이 도구와 tools.run_demo가 함께 쓴다.
+    하나라도 안 되면 아무것도 보내지 않고 AiSetupError를 낸다. 이 도구와 tools.run_demo가 함께 쓴다. 공통 부분은 tools.ai_common에 있다.
     """
-    results_dir = Path(results_dir) if results_dir else RESULTS_DIR
     if args.real_profile:
         raise AiSetupError("--real-profile은 구현하지 않았다. 실제 지원자 프로필은 팀의 별도 승인 뒤에도 이 도구로 보내지 않는다 (정책 16장).")
-    print(FREE_TIER_NOTICE)
-    if not args.accept_free_tier_terms:
-        raise AiSetupError("위 조건에 동의하면 --accept-free-tier-terms를 붙여 다시 실행하라. 아직 아무것도 보내지 않았다.")
-    env = load_env()
-    for flag, key in (("model", "GEMINI_MODEL"), ("rpm", "GEMINI_RPM"), ("rpd", "GEMINI_RPD")):
-        if getattr(args, flag) is not None:
-            env[key] = str(getattr(args, flag))
-    try:
-        settings = GeminiSettings.from_env(env)
-        postings = load_postings(Path(args.postings))
-    except (LLMConfigError, FileNotFoundError) as e:
-        raise AiSetupError(f"실행할 수 없다: {e}") from None
-    if missing := [i for i in job_ids if i not in postings]:
-        raise AiSetupError(f"공고 원문이 없는 표본: {missing}")
-    usage = UsageLog(results_dir / "llm_usage.jsonl")
-    gemini = GeminiClient(settings, usage)
-    try:
-        gemini.ensure_budget(2 * len(job_ids))
-    except LLMQuotaExceeded as e:
-        raise AiSetupError(f"시작하지 않았다: {e}") from None
-    extract_dir = results_dir / "llm_cache" / (f"run-{usage.run_id}" if args.fresh_cache else "extract")
-    client = CachedClient(gemini, usage=usage, extract_dir=extract_dir,
-                          profile_dir=results_dir / "llm_cache" / "profile", cache_profile=args.cache_profile)
-    return AiSession(settings, usage, gemini, client, postings, usage.calls_today(settings.model))
+    loaded: dict[str, str] = {}
+
+    def load_inputs():
+        try:
+            loaded.update(load_postings(Path(args.postings)))
+        except FileNotFoundError as e:
+            raise AiSetupError(f"실행할 수 없다: {e}") from None
+        if missing := [i for i in job_ids if i not in loaded]:
+            raise AiSetupError(f"공고 원문이 없는 표본: {missing}")
+
+    session = prepare_session(
+        args, notice=FREE_TIER_NOTICE, needed_calls=2 * len(job_ids), results_dir=results_dir or RESULTS_DIR,
+        cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient, before_client=load_inputs,
+    )
+    session.postings = loaded
+    return session
 
 
 def run_ai(args):

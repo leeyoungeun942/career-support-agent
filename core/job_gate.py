@@ -26,10 +26,11 @@ REPO = Path(__file__).resolve().parents[1]
 MAP_CSV = REPO / "data" / "job_family_map.csv"
 
 class AiJudge(Protocol):
-    """AI 자리의 형태 (5-2의 4단계). 실제 AI 연결은 보류라 지금은 mock과 스텁만 쓴다 (job-gate.md 8장).
+    """AI 자리의 형태 (5-2의 4단계). 기본은 mock과 스텁이고, 실제 모델은 core/job_gate_ai.py의 어댑터가 같은 형태로 채운다 (job-gate.md 5-2 "AI 판별의 계약", 8장).
 
     request 키: level("subtask"/"item"), item_index, sub_index, text, item_text, other_items,
-                candidates, allowed, families
+                context_items, candidates, allowed, families
+    context_items: 업무 항목이 아닌 설명 문장(회사 소개·포지션 설명, 입력에서 exclude를 붙인 항목). 항목으로 세지 않고 참고 문맥으로만 준다 (5-2).
     반환: {"label": str, "reason": str}. 라벨은 request["allowed"] 안에서만 고른다.
     request에는 직무명·모집부문·사람인 대분류·자격요건·우대사항·다른 항목의 라벨을 넣지 않는다 (5-2).
     """
@@ -191,7 +192,7 @@ def allowed_labels(candidates):
     return base + [COMMON, OUT_OF_SCOPE, MIXED]
 
 
-def label_subtask(text, item_text, item_index, sub_index, other_items, dic, ai_judge, log):
+def label_subtask(text, item_text, item_index, sub_index, other_items, dic, ai_judge, log, context_items=()):
     info = analyze(text, item_text, dic)
     fams = list(info["families"])
     reasons = []
@@ -218,7 +219,7 @@ def label_subtask(text, item_text, item_index, sub_index, other_items, dic, ai_j
 
     request = {
         "level": "subtask", "item_index": item_index, "sub_index": sub_index,
-        "text": text, "item_text": item_text, "other_items": other_items,
+        "text": text, "item_text": item_text, "other_items": other_items, "context_items": list(context_items),
         "candidates": fams, "allowed": allowed_labels(fams), "families": cfg.active_families(),
     }
     answer = ai_judge(request)
@@ -230,7 +231,7 @@ def label_subtask(text, item_text, item_index, sub_index, other_items, dic, ai_j
     return record
 
 
-def item_label(subs, item_text, item_index, other_items, ai_judge, log):
+def item_label(subs, item_text, item_index, other_items, ai_judge, log, context_items=()):
     """하위 업무 라벨을 항목 라벨로 올린다 (5-2 항목 라벨 규칙)."""
     labels = [s["label"] for s in subs]
     n = len(labels)
@@ -242,7 +243,7 @@ def item_label(subs, item_text, item_index, other_items, ai_judge, log):
     if len(non_common) * 2 == n:
         request = {
             "level": "item", "item_index": item_index, "sub_index": None,
-            "text": item_text, "item_text": item_text, "other_items": other_items,
+            "text": item_text, "item_text": item_text, "other_items": other_items, "context_items": list(context_items),
             "candidates": sorted(set(non_common) - {OUT_OF_SCOPE, MIXED}),
             "allowed": allowed_labels(sorted(set(non_common) - {OUT_OF_SCOPE, MIXED})),
             "families": cfg.active_families(),
@@ -291,6 +292,8 @@ def judge(posting, desired_family, ai_judge, dic=None):
     items = [it for it in posting["items"] if not it.get("exclude")]
     result["item_count"] = len(items)  # 정리된 업무 항목 수. 정보 부족 판정의 근거 문구가 쓴다
     texts = [(it.get("heading", "") + " " + it["text"]).strip() for it in items]
+    # 회사 소개·포지션 설명 문장(exclude 항목)은 항목으로 세지 않고 AI에 참고 문맥으로만 준다 (5-2)
+    context_items = [(it.get("heading", "") + " " + it["text"]).strip() for it in posting["items"] if it.get("exclude")]
 
     # 대분류 정보는 샘플에 없다 (5-3): 1단계 ①은 항상 참
     title_text = posting["job_title"] + " " + posting.get("position", "")
@@ -324,9 +327,9 @@ def judge(posting, desired_family, ai_judge, dic=None):
     for i, it in enumerate(items):
         subs, others = analyzed[i]
         sub_records = [
-            label_subtask(s, texts[i], i, k, others, dic, ai_judge, log) for k, s in enumerate(subs)
+            label_subtask(s, texts[i], i, k, others, dic, ai_judge, log, context_items) for k, s in enumerate(subs)
         ]
-        label, why = item_label(sub_records, texts[i], i, others, ai_judge, log)
+        label, why = item_label(sub_records, texts[i], i, others, ai_judge, log, context_items)
         result["items"].append({"index": i, "heading": it.get("heading", ""), "text": it["text"],
                                 "label": label, "why": why, "subtasks": sub_records})
         for s in sub_records:

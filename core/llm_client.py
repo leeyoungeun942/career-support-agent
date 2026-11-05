@@ -60,6 +60,7 @@ class LLMRequest:
     job_id: str = ""
     prompt_version: str = "0"     # 프롬프트 파일 맨 위 version. 캐시 키에 들어간다
     contains_profile: bool = False  # 프로필이 든 요청은 기본으로 디스크 캐시에 남기지 않는다 (정책 16장)
+    system: str | None = None     # 시스템 지시. 믿을 수 있는 규칙만 담는다. 외부에서 온 글은 prompt(사용자 메시지)에 넣는다
 
 
 @dataclass(frozen=True)
@@ -217,7 +218,10 @@ class UsageLog:
 def cache_key(model: str, request: LLMRequest, config_id: str = "") -> str:
     """모델 ID·생성 설정·프롬프트 버전·단계·프롬프트·스키마의 해시. 키는 파일 이름이 되므로 내용이 노출되지 않는다."""
     schema = json.dumps(request.schema.model_json_schema(), sort_keys=True, ensure_ascii=False)
-    blob = json.dumps([model, config_id, request.prompt_version, request.stage, request.prompt, schema], ensure_ascii=False)
+    parts = [model, config_id, request.prompt_version, request.stage, request.prompt, schema]
+    if request.system:  # 시스템 지시가 없는 요청의 키는 이전과 같게 둔다
+        parts.append(request.system)
+    blob = json.dumps(parts, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -441,7 +445,10 @@ class GeminiClient(BaseClient):
             self._sdk_client = genai.Client(
                 api_key=self.settings.api_key, http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_SECONDS * 1000)  # 밀리초
             )
-        config = types.GenerateContentConfig(response_mime_type=self.generation_config["response_mime_type"], response_schema=request.schema)
+        config = types.GenerateContentConfig(
+            response_mime_type=self.generation_config["response_mime_type"], response_schema=request.schema,
+            system_instruction=request.system,  # None이면 보내지 않는다
+        )
         r = self._sdk_client.models.generate_content(model=self.model, contents=request.prompt, config=config)
         usage = r.usage_metadata
         out = (getattr(usage, "candidates_token_count", 0) or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
