@@ -1,6 +1,8 @@
 """tools.eval_gate의 샘플 6건 모드와 --ai 연결 검증 (정책 job-gate.md 6-3, 6-5, 8장; 이슈 #12). 네트워크를 쓰지 않는다."""
 import json
+import random
 import re
+import types
 
 import pytest
 
@@ -298,3 +300,150 @@ def test_mock_label_mock_and_adapter_share_the_ai_judge_shape():
     request = {"level": "subtask", "item_index": 0, "sub_index": 0, "text": "t", "item_text": "t", "other_items": [],
                "candidates": [], "allowed": [SP, DEV, "common", "out_of_scope", "mixed"], "families": gate.cfg.active_families()}
     assert set(make_label_mock([SP])(request)) == {"label", "reason"}
+
+
+# ---------------------------------------------------------------- PR 리뷰 반영 (이슈 #12): 호출 예산은 mock 예상이 아니라 최대 논리 호출 기준이다
+
+def record_of(*items):
+    """항목마다 하위 업무의 source("rule"/"ai") 목록을 받아 max_logical_calls가 읽는 기록 모양으로 만든다."""
+    return {"items": [{"subtasks": [{"source": s} for s in subs]} for subs in items]}
+
+
+@pytest.mark.parametrize("items, want", [
+    ([["ai"] * 4], 5),                     # 짝수이고 규칙 확정이 없다: 공통이 아닌 수가 절반이 될 수 있다 -> 하위 업무 4 + 항목 1
+    ([["rule"] * 3 + ["ai"]], 1),          # 규칙이 확정한 3개가 이미 절반(2)을 넘었다: 절반이 될 수 없다
+    ([["ai"] * 3], 3),                     # 홀수는 정확히 절반이 없다
+    ([["rule", "ai"]], 2),                 # r=1, n/2=1: AI가 공통이라 답하면 절반이다
+    ([["ai", "ai"]], 3),
+    ([["rule", "rule"]], 0),               # 모두 규칙 확정이면 AI를 부르지 않는다
+    ([["rule"] * 2 + ["ai"] * 4], 5),      # n=6, r=2 <= 3 <= 6
+    ([["rule"] * 4 + ["ai"] * 2], 2),      # n=6, r=4 > 3
+    ([["ai"], ["ai", "ai"], ["rule"]], 1 + 3 + 0),
+    ([], 0),
+])
+def test_max_logical_calls_counts_the_item_level_calls_the_ai_answers_could_cause(items, want):
+    assert eval_gate.max_logical_calls(record_of(*items)) == want
+
+
+def test_record_that_ended_before_labeling_has_no_calls():
+    assert eval_gate.max_logical_calls({"items": []}) == 0
+
+
+MIXED_ITEMS = [
+    {"text": "백엔드 API 서버를 개발한다 / 화면 와이어프레임을 설계한다 / Python으로 서비스 기능을 구현한다 / 서비스 요구사항을 정의한다"},
+    {"text": "회사의 다양한 업무를 지원하고 필요한 일을 수행 / 기타 관련 업무 전반"},
+    {"text": "영업 거래처를 관리한다 / 백엔드 API 서버를 개발한다 / 서비스 요구사항을 정의한다 / 마케팅 캠페인을 운영한다"},
+    {"text": "기타 관련 업무 전반"},
+]
+
+
+def test_the_bound_is_never_exceeded_and_is_actually_reached_by_some_answers():
+    """임의의 AI 답으로 수백 번 돌려도 논리 호출은 최대치 이하이고, 항목마다 절반을 만드는 답에서는 최대치에 닿는다(상한이 느슨하지 않다)."""
+    case = {"id": "sample-1", "no": 1, "job_title": "t", "position": "p", "items": MIXED_ITEMS, "expected_labels": [DEV] * 4}
+    dic = gate.Dictionary()
+    expected, bound = eval_gate.ai_call_bounds([case], SP)
+    assert bound > expected  # mock 예상은 상한이 아니다
+    most = 0
+    for seed in range(600):
+        rnd = random.Random(seed)
+        requests = []
+        choices = lambda req, rnd=rnd: {"label": rnd.choice([gate.COMMON, req["allowed"][0]]), "reason": "r"}  # noqa: E731
+        eval_gate.run(case, SP, eval_gate._recording(choices, requests), dic)
+        assert len(requests) <= bound, seed
+        most = max(most, len(requests))
+    assert most == bound
+
+
+def test_mock_expected_calls_can_be_lower_than_what_a_real_ai_causes():
+    """mock 예상 3회인 입력에서 AI가 공통을 하나 섞으면 항목 단위 호출이 생겨 4회가 된다. 예산은 4회 기준이어야 한다."""
+    case = {"id": "sample-1", "no": 1, "job_title": "t", "position": "p", "expected_labels": [SP, SP],
+            "items": [{"text": AMBIGUOUS_A[0]["text"] + " / " + AMBIGUOUS_A[1]["text"]}, {"text": AMBIGUOUS_B[0]["text"]}]}
+    assert eval_gate.ai_call_bounds([case], SP) == (3, 4)
+    requests = []
+    calls = iter([SP, gate.COMMON, SP, SP])
+    eval_gate.run(case, SP, eval_gate._recording(lambda req: {"label": next(calls), "reason": "r"}, requests), gate.Dictionary())
+    assert len(requests) == 4  # 3 + 항목 단위 1
+
+
+@pytest.fixture
+def split_env(tmp_path, monkeypatch):
+    """한 항목이 하위 업무 2개인 합성 공고 1건. AI가 둘째 하위 업무를 공통이라 답해 mock보다 호출이 하나 늘어난다."""
+    cases, expected = tmp_path / "cases.json", tmp_path / "expected.json"
+    items = [{"heading": "", "text": AMBIGUOUS_A[0]["text"] + " / " + AMBIGUOUS_A[1]["text"]}, AMBIGUOUS_B[0]]
+    cases.write_text(json.dumps({"cases": [raw_case(1, items)]}, ensure_ascii=False), encoding="utf-8")
+    expected.write_text(json.dumps({"desired_family": SP, "cases": [expected_case(1, "match", SP, [SP, SP])]}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(eval_gate, "SAMPLE_CASES_JSON", cases)
+    monkeypatch.setattr(eval_gate, "SAMPLE_EXPECTED_JSON", expected)
+
+    class SplitGemini(FakeGemini):
+        def _fake_generate(self, request):
+            type(self).called.append(request.job_id)
+            label = gate.COMMON if request.job_id == "sample-1:item:0:subtask:1" else SP
+            return json.dumps({"label": label, "reason": "r"}), 11, 7
+
+    SplitGemini.called, SplitGemini.created, SplitGemini.fail_jobs, SplitGemini.quota_jobs = [], 0, (), ()
+    monkeypatch.setattr(eval_gate, "RESULTS_DIR", tmp_path / "results")
+    monkeypatch.setattr(eval_gate, "GeminiClient", SplitGemini)
+
+    def set_limit(rpd):
+        monkeypatch.setattr(eval_gate, "load_env", lambda: {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-test", "GEMINI_RPM": "60", "GEMINI_RPD": str(rpd)})
+
+    set_limit(100)
+    return SplitGemini, set_limit
+
+
+def test_budget_uses_the_maximum_logical_calls_not_the_mock_estimate(split_env, capsys):
+    client, set_limit = split_env
+    set_limit(14)  # mock 예상 3회 기준이면 3 x 4 = 12 <= 14로 시작하지만, 최대 논리 4회 기준이면 16 > 14라 시작하지 않는다
+    assert main(*AI) == 2
+    err = capsys.readouterr().err
+    assert "시작하지 않았다" in err and "필요한 호출 16회" in err and client.called == []
+    set_limit(16)
+    assert main(*AI) == 0
+
+
+def test_ai_run_reports_mock_estimate_maximum_actual_logical_and_actual_attempts(split_env, capsys):
+    client, _ = split_env
+    assert main(*AI) == 0
+    cap = capsys.readouterr()
+    assert "논리 호출 예상 3회, 최대 논리 4회, 최대 시도 16회" in cap.out
+    assert "호출 비교: mock 예상 논리 3회 / 최대 논리 4회 / 실제 논리 4회 / 실제 시도 4회(최대 시도 16회)" in cap.out
+    assert "경고" not in cap.err and sorted(client.called) == ["sample-1:item:0", "sample-1:item:0:subtask:0",
+                                                               "sample-1:item:0:subtask:1", "sample-1:item:1:subtask:0"]
+
+
+def test_a_warning_is_printed_if_the_actual_calls_ever_exceed_the_computed_maximum(split_env, monkeypatch, capsys):
+    monkeypatch.setattr(eval_gate, "ai_call_bounds", lambda cases, desired, dic=None: (2, 2))  # 일부러 틀린 계산
+    main(*AI)
+    assert "계산한 최대치를 넘었다" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- 함수 경계의 샘플 범위 검사 (P2)
+
+@pytest.mark.parametrize("ids", [["wanted-77"], ["sample-1", "sample-1"], ["sample-1", "sample-9"], [f"sample-{n}" for n in range(1, 8)], []])
+def test_check_ai_scope_rejects_anything_that_is_not_the_sample_six(ids):
+    with pytest.raises(eval_gate.AiSetupError, match="샘플 6건") as e:
+        eval_gate.check_ai_scope([{"id": i} for i in ids])
+    assert e.value.code == 2
+
+
+def test_check_ai_scope_accepts_any_subset_of_the_sample_six_and_the_full_set():
+    eval_gate.check_ai_scope([{"id": f"sample-{n}"} for n in range(1, 7)])
+    eval_gate.check_ai_scope([{"id": "sample-3"}])
+
+
+def test_run_sample_ai_refuses_an_out_of_scope_input_even_when_called_directly(ai_env, monkeypatch, capsys):
+    """CLI(main)를 거치지 않고 함수를 직접 불러도 개발셋 크기의 입력은 아무것도 보내지 않고 거부한다."""
+    big = [{"id": f"wanted-{n}", "no": n, "job_title": "t", "position": "p", "items": [], "expected_labels": [],
+            "expected_gate": "match", "expected_core": SP} for n in range(200)]
+    monkeypatch.setattr(eval_gate, "load_sample", lambda *a, **k: (SP, big))
+    args = types.SimpleNamespace(accept_free_tier_terms=True, model=None, rpm=None, rpd=None, fresh_cache=False, verbose=False)
+    assert eval_gate.run_sample_ai(args) == 2
+    assert "샘플 6건" in capsys.readouterr().err and FakeGemini.created == 0 and FakeGemini.called == []
+
+
+def test_run_sample_ai_never_reaches_the_budget_step_for_an_out_of_scope_input(ai_env, monkeypatch):
+    monkeypatch.setattr(eval_gate, "load_sample", lambda *a, **k: (SP, [{"id": "wanted-1"}]))
+    monkeypatch.setattr(eval_gate, "ai_call_bounds", lambda *a, **k: pytest.fail("범위 검사 전에 호출 수를 계산했다"))
+    args = types.SimpleNamespace(accept_free_tier_terms=True, model=None, rpm=None, rpd=None, fresh_cache=False, verbose=False)
+    assert eval_gate.run_sample_ai(args) == 2
