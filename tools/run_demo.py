@@ -31,6 +31,7 @@ from pathlib import Path
 
 from core.job_gate_mock import make_label_mock
 from agents.application_writer import KINDS, SECTIONS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from agents.task_linker import build_links, link_tasks
 from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
@@ -44,6 +45,7 @@ from tools.ai_common import AiSetupError, prepare_session
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ev.RESULTS_DIR
 GATE_CASES_JSON = REPO / "data" / "sample-jobs" / "gate_sample_cases.json"
+TASK_LINKS_JSON = REPO / "tests" / "fixtures" / "task_links_sample3.json"  # 사람이 확정한 가상 프로필의 연결 후보 (합성 fixture, 정책 5장 D18)
 WRITER_MOCK_JSON = REPO / "tests" / "fixtures" / "writer_mock_sample3.json"
 PROFILE_REF = ProfileRef(profile_id="kim-haneul", is_synthetic=True)  # fixture의 가상 프로필 (김하늘)
 EXIT_REFUSED = 2
@@ -294,11 +296,26 @@ def render_draft(draft: ApplicationDraft, saved: Path | None, md: Path | None = 
     return lines
 
 
+def _task_links(args, profile, selected, info):
+    """--task-links에 따라 업무 연결 후보를 만든다. none은 없음, fixture는 사람이 확정한 합성 fixture, ai는 호출 1회 (결과는 저장하지 않는다)."""
+    mode = args.task_links
+    if mode == "none":
+        return []
+    if mode == "fixture":
+        entry = {k: v for k, v in json.loads(TASK_LINKS_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}.get(args.select)
+        if entry is None:
+            raise ValueError(f"고정된 연결 후보가 없다: {args.select}")
+        return build_links(profile, entry["tasks"], {"links": entry["links"]})
+    return link_tasks(profile, info.main_tasks, args.writer_client, allow_external_profile=True,
+                      is_synthetic=selected.profile.is_synthetic, job_id=args.select)
+
+
 def _draft(run: PipelineRun, profile, args) -> int:
     """고른 공고의 초안을 mock으로 만들어 보인다. 입력(WriterInput)은 메모리에만 있고 저장하지 않는다."""
     try:
         selected = select_job(run, args.select, include_profile_evidence=True)
-        wi = build_writer_input(selected, profile, _job_info(args.select, args.gate_cases))
+        info = _job_info(args.select, args.gate_cases)
+        wi = build_writer_input(selected, profile, info, task_links=_task_links(args, profile, selected, info))
         client = getattr(args, "writer_client", None)
         if client is None:  # mock: fixture의 초안을 돌려준다
             answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
@@ -387,7 +404,7 @@ def run_draft_ai(args) -> int:
     """
     try:
         build_scenario(args.gate, args.gate_cases)
-        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=1 + MAX_RETRIES, results_dir=RESULTS_DIR,
+        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=(1 + MAX_RETRIES) * (2 if args.task_links == "ai" else 1), results_dir=RESULTS_DIR,
                                   cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient)
     except AiSetupError as e:
         print(e, file=sys.stderr)
@@ -413,6 +430,8 @@ def main(argv=None):
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
     p.add_argument("--select", metavar="JOB_ID", help="고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(초안 형식)로 저장한다")
     p.add_argument("--draft", choices=KINDS, help="고른 공고(--select)의 자소서 또는 포트폴리오 초안을 만든다 (mock만)")
+    p.add_argument("--task-links", choices=("none", "fixture", "ai"), default="none",
+                   help="초안에 주요 업무 연결 후보를 더한다. none=없음(기본), fixture=사람이 확정한 합성 fixture, ai=연결 후보 호출 1회(--ai일 때만, 결과는 저장하지 않는다)")
     p.add_argument("--save-draft", action="store_true", help="초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)")
     p.add_argument("--save-profile-evidence", action="store_true", help="저장 파일에 프로필 원문 인용을 넣는다 (가상 프로필 한정)")
     p.add_argument("--cache-profile", action="store_true", help="근거 찾기 결과를 디스크에 캐시한다(가상 프로필 개발용)")
@@ -429,6 +448,10 @@ def main(argv=None):
         p.error("--draft는 --select와 함께 쓴다")
     if args.save_draft and not args.draft:
         p.error("--save-draft는 --draft와 함께 쓴다")
+    if args.task_links != "none" and not args.draft:
+        p.error("--task-links는 --draft와 함께 쓴다")
+    if args.task_links == "ai" and not args.ai:
+        p.error("--task-links ai는 --ai와 함께 쓴다")
     if args.draft and args.real_profile:
         p.error("--real-profile은 구현하지 않았다")
     if args.draft and args.ai:

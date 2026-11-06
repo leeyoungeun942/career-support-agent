@@ -114,6 +114,11 @@ def _evidence_problem(profile: EligibilityProfile, ev: ProfileEvidence) -> str |
     return None
 
 
+def evidence_problem(profile: EligibilityProfile, ev: ProfileEvidence) -> str | None:
+    """근거 하나가 프로필 원문과 맞지 않으면 사유를, 맞으면 None을 돌려준다(업무 연결 후보처럼 요건 결과 밖의 인용을 대조할 때 쓴다)."""
+    return _evidence_problem(profile, ev)
+
+
 class ProfileEvidenceError(ValueError):
     """프로필 근거 인용이 프로필 원문과 맞지 않는다. 호출하는 쪽이 실패 범주를 메시지가 아니라 이 타입으로 가른다.
 

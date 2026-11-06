@@ -414,8 +414,11 @@ class DraftRouting(Routing):
 
     def _complete(self, request):
         self.requests.append(request)
-        assert request.stage.startswith("write_"), f"초안 작성이 아닌 단계를 보냈다: {request.stage}"
-        data = DraftRouting.answer_override or self.answers[(request.stage, request.job_id)]
+        assert request.stage.startswith("write_") or request.stage == "link_tasks", f"초안 작성이나 연결 후보가 아닌 단계를 보냈다: {request.stage}"
+        if request.stage == "link_tasks":
+            data = {"links": json.loads(demo.TASK_LINKS_JSON.read_text(encoding="utf-8"))["sample-3"]["links"]}
+        else:
+            data = DraftRouting.answer_override or self.answers[(request.stage, request.job_id)]
         self.usage.record(request, model=self.model, input_tokens=11, output_tokens=5)
         return LLMResponse(data=data, input_tokens=11, output_tokens=5)
 
@@ -672,3 +675,31 @@ def test_review_md_is_not_written_for_a_real_profile_and_never_overwrites(tmp_pa
 
 def test_policy_documents_the_review_md():
     assert "확인용 md" in POLICY and "D13" in POLICY and "--save-draft" in POLICY
+
+
+# ---------------------------------------------------------------- --task-links ai: 연결 후보 호출 1회가 초안 호출 앞에 붙는다 (정책 5장 D18)
+
+def test_task_links_ai_adds_one_call_before_the_draft_and_counts_it_in_the_budget(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--draft", "cover_letter") == 0
+    client = draft_ai[0]
+    assert [r.stage for r in client.requests] == ["link_tasks", "write_cover_letter"]
+    assert all(r.contains_profile is True for r in client.requests)  # 둘 다 디스크 캐시에 안 남는다
+    assert Routing.needed == 2 * (1 + MAX_RETRIES)  # 예산 점검에 연결 후보 호출을 반영한다
+    assert not (results / "llm_cache" / "profile").exists()
+    assert "자격요건과 게이트는 mock" in capsys.readouterr().out
+
+
+def test_task_links_are_never_written_by_a_real_ai_run(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--draft", "cover_letter", "--save-draft") == 0
+    capsys.readouterr()
+    for path in results.rglob("*"):  # 연결 후보(프로필 원문)와 근거 경험은 어떤 파일에도 구조 그대로 남지 않는다
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            assert "task_links" not in text and "evidence_detail" not in text, path
+    usage = (results / "llm_usage.jsonl").read_text(encoding="utf-8")
+    assert "카페" not in usage and "quote" not in usage  # 사용량 기록에는 내용이 없다
+
+
+def test_task_links_none_is_the_default_and_sends_no_link_call(draft_ai, capsys):
+    assert main(*AI, "--draft", "cover_letter") == 0
+    assert [r.stage for r in draft_ai[0].requests] == ["write_cover_letter"]
