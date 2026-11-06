@@ -5,6 +5,7 @@ LLM은 섹션별 문장(text)과 쓴 사실 id(fact_ids)만 낸다. 어떤 사�
 """
 import json
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -32,6 +33,8 @@ SECTIONS: dict[str, dict[str, str]] = {
 }
 DATA_MARKER = "\n## 입력 데이터\n"
 DRAFT_BANNER = "초안입니다. 제출 전에 사실을 직접 확인하세요."
+VERIFICATION_NOTE = ("코드는 사실 id, 숫자, 영문 이름만 대조했다. 문장의 의미(과장, 새 성과, 프로필에 없는 태도 표현)는 검증하지 않았다. "
+                     "안전 검증을 마친 결과가 아니다.")
 
 # 본문에서 확인하는 토큰: 숫자 덩어리와 영문 고유명(도구명, 자격증명 등). 정책 3장
 _NUMBER = re.compile(r"(?<![A-Za-z\d])\d+(?:[.,]\d+)*(?![A-Za-z])")  # B2B 같은 영문 이름 안의 숫자는 영문 토큰이 맡는다
@@ -59,7 +62,7 @@ class DraftResponse(BaseModel):
 
 
 class DraftMeta(BaseModel):
-    mode: str  # mock / ai
+    mode: Literal["mock", "ai"]
     model: str
     prompt_version: str
     input_tokens: int = 0
@@ -67,7 +70,7 @@ class DraftMeta(BaseModel):
 
 
 class ApplicationDraft(BaseModel):
-    kind: str
+    kind: Literal["cover_letter", "portfolio"]
     job_id: str
     run_id: str
     profile_id: str
@@ -76,6 +79,7 @@ class ApplicationDraft(BaseModel):
     to_confirm: list[ToConfirm]
     notices: list[str]
     banner: str = DRAFT_BANNER
+    verification: str = VERIFICATION_NOTE
     meta: DraftMeta
 
 
@@ -91,9 +95,20 @@ def _texts(obj) -> list[str]:
     return [str(obj)] if obj is not None else []
 
 
-def _corpus(wi: WriterInput) -> str:
-    """본문의 숫자·영문 토큰이 근거로 삼을 수 있는 글: 프로필, 공고 내용, 사실 문장."""
-    parts = [*_texts(wi.profile), *_texts(wi.job.model_dump()), *_texts([f.model_dump() for f in wi.usable_facts])]
+JOB_CONTEXT_SECTIONS = {"motivation", "job_connection"}  # 공고와 연결하는 문맥. 여기서만 회사명·직무명·업무 항목의 토큰을 쓸 수 있다
+
+
+def _corpus(wi: WriterInput, section: str, fact_ids: list[str]) -> str:
+    """섹션 본문의 숫자·영문 토큰이 근거로 삼을 수 있는 글: 그 섹션이 인용한 사실의 문장·인용문·비교식.
+
+    프로필 전체나 공고 요건은 근거가 아니다(인용하지 않은 경험, 확인 필요 요건의 토큰이 새는 것을 막는다).
+    연결 문맥의 섹션에서만 회사명, 직무명, 업무 항목을 더한다.
+    """
+    cited = [f for f in wi.usable_facts if f.fact_id in fact_ids]
+    parts = [*_texts([f.model_dump() for f in cited])]
+    if section in JOB_CONTEXT_SECTIONS:
+        j = wi.job
+        parts += _texts([j.company_name, j.job_title, j.position, j.main_tasks])
     return "\n".join(parts).casefold()
 
 
@@ -102,7 +117,6 @@ def validate_draft(response: dict, wi: WriterInput, kind: str) -> list[DraftSect
     allowed = SECTIONS[kind]
     sections = [DraftSection(**s) for s in response["sections"]]
     seen: set[str] = set()
-    corpus = _corpus(wi)
     facts, forbidden = wi.fact_ids, wi.forbidden_ids
     for s in sections:
         if s.section not in allowed or s.section in seen:
@@ -115,6 +129,7 @@ def validate_draft(response: dict, wi: WriterInput, kind: str) -> list[DraftSect
                 raise DraftError("forbidden_fact_id", f"{s.section}: {fid}")
             if fid not in facts:
                 raise DraftError("unknown_fact_id", f"{s.section}: {fid}")
+        corpus = _corpus(wi, s.section, s.fact_ids)
         for token in _NUMBER.findall(s.text):
             if not re.search(rf"(?<![A-Za-z\d.,]){re.escape(token)}(?![A-Za-z]|[.,]?\d)", corpus):  # 다른 숫자나 영문 이름(B2B 등)의 일부가 아닌 같은 숫자가 입력에 있어야 한다
                 raise DraftError("unsupported_token", f"{s.section}: {token}")

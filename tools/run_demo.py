@@ -244,7 +244,7 @@ def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
     """초안을 화면에 낸다. 첫 줄에 mock / ai를 표시한다. 확인 필요 목록과 경고 문구는 코드가 붙인 것이다."""
     kind = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}[draft.kind]
     lines = [f"=== 초안: {kind} / writer: {draft.meta.mode} ({draft.meta.model}) / 공고 {draft.job_id} / 프롬프트 v{draft.meta.prompt_version} ===",
-             draft.banner]
+             draft.banner, f"검증 한계: {draft.verification}"]
     for s in draft.sections:
         lines += [f"[{s.section}] (사실 {', '.join(s.fact_ids)})", f"    {s.text}"]
     lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")

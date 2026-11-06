@@ -168,12 +168,42 @@ def test_a_draft_that_cites_a_do_not_claim_fact_is_rejected():
 
 
 def test_numbers_must_be_the_same_number_not_a_piece_of_another():
-    """'20'은 입력의 '2026'이나 '200'의 일부라서 통과해서는 안 된다."""
-    for bad in ("약 20건을 분석했습니다.", "2건을 분석했습니다."):
+    """'20'이나 '2026'은 인용한 사실의 '2026.02'의 일부라서 통과해서는 안 된다."""
+    for bad in ("2026에 졸업했습니다.", "20에 졸업했습니다.", "2에 졸업했습니다."):
         with pytest.raises(DraftError):
-            write_application(writer_input(), FakeClient([response(("motivation", bad, ["F3"]))]), "cover_letter")
-    ok = write_application(writer_input(), FakeClient([response(("motivation", "약 200건을 분석했습니다.", ["F3"]))]), "cover_letter")
-    assert ok.sections[0].fact_ids == ["F3"]
+            write_application(writer_input(), FakeClient([response(("motivation", bad, ["F2"]))]), "cover_letter")
+    ok = write_application(writer_input(), FakeClient([response(("motivation", "2026.02에 졸업했습니다.", ["F2"]))]), "cover_letter")
+    assert ok.sections[0].fact_ids == ["F2"]
+
+
+def test_tokens_must_come_from_the_cited_facts_not_from_the_whole_input():
+    """공고에만 있는 숫자, 인용하지 않은 프로필 경험의 도구명, 확인 필요 요건의 이름은 F1을 붙여도 거부한다."""
+    wi = writer_input()
+    assert any("4년" in r.text for r in wi.job.requirements) and "4" not in str(wi.usable_facts[0].model_dump())  # 4년은 F2의 요건에만 있다
+    for section, text in (("job_experience", "4년 이상 경력이 있습니다."),
+                          ("job_experience", "Figma로 와이어프레임을 만들었습니다."),   # 프로필의 다른 경험에는 있지만 F1이 인용하지 않았다
+                          ("job_experience", "SQL을 사용했습니다.")):
+        with pytest.raises(DraftError) as e:
+            write_application(wi, FakeClient([response((section, text, ["F1"]))]), "cover_letter")
+        assert e.value.code == "unsupported_token"
+
+
+def test_company_and_job_names_are_allowed_only_in_the_connection_sections():
+    job = writer_input().job.model_copy(update={"job_title": "AIPlanner"})
+    wi = writer_input().model_copy(update={"job": job})
+    ok = write_application(wi, FakeClient([response(("motivation", "AIPlanner 직무에 지원합니다.", ["F1"]))]), "cover_letter")
+    assert ok.sections[0].section == "motivation"
+    with pytest.raises(DraftError):
+        write_application(wi, FakeClient([response(("job_experience", "AIPlanner 직무에 지원합니다.", ["F1"]))]), "cover_letter")
+
+
+def test_draft_states_that_meaning_was_not_verified_and_types_are_closed():
+    d = one("motivation", "서비스 기획 보조 업무를 했습니다.", ["F1"])
+    assert "검증하지 않았다" in d.verification and "안전 검증을 마친 결과가 아니다" in d.verification
+    with pytest.raises(ValueError):
+        aw.ApplicationDraft(**{**d.model_dump(), "kind": "essay"})
+    with pytest.raises(ValueError):
+        aw.ApplicationDraft(**{**d.model_dump(), "meta": {**d.meta.model_dump(), "mode": "live"}})
 
 
 def test_rejection_message_has_no_draft_text():
