@@ -495,7 +495,7 @@ def test_draft_ai_quota_exhaustion_during_the_call_is_reported_not_traced(draft_
 def test_evidence_detail_is_a_list_with_every_cited_experience_and_only_the_four_fields():
     wi = writer_input("sample-3")
     facts = {f.fact_id: f for f in wi.usable_facts}
-    assert [d.experience_id for d in facts["F3"].evidence_detail] == ["exp-2", "exp-3", "exp-4"]  # 인용된 경험 모두
+    assert [d.experience_id for d in facts["F3"].evidence_detail] == ["exp-2", "exp-3", "exp-4", "exp-5"]  # 인용된 경험 모두
     assert [d.experience_id for d in facts["F1"].evidence_detail] == ["exp-1"]  # 인용하지 않은 경험은 붙지 않는다
     assert set(ExperienceDetail.model_fields) == {"experience_id", "role", "actions", "tools", "result"}
     dumped = facts["F3"].model_dump(include={"evidence_detail"})
@@ -549,7 +549,7 @@ def test_identifiers_and_metadata_are_not_token_evidence():
 
 
 def test_job_requirement_numbers_are_not_evidence_even_with_the_experience_attached():
-    assert rejected(shaped("job_experience", paragraphs=[("4년 이상의 경험이 있습니다.", ["F3"])])) == "unsupported_token"
+    assert rejected(shaped("job_experience", paragraphs=[("4년 이상의 경험이 있습니다.", ["F1"])])) == "unsupported_token"  # F1에는 exp-1이 붙어 있지만 4는 없다
 
 
 # ---------------------------------------------------------------- 제목과 불릿도 같은 검증을 받는다 (#21)
