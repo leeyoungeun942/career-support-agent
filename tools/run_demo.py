@@ -246,7 +246,9 @@ def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
     lines = [f"=== 초안: {kind} / writer: {draft.meta.mode} ({draft.meta.model}) / 공고 {draft.job_id} / 프롬프트 v{draft.meta.prompt_version} ===",
              draft.banner, f"검증 한계: {draft.verification}"]
     for s in draft.sections:
-        lines += [f"[{s.section}] (사실 {', '.join(s.fact_ids)})", f"    {s.text}"]
+        lines += [f"[{s.section}] {s.heading}"]
+        lines += [f"    {p.text} (사실 {', '.join(p.fact_ids)})" for p in s.paragraphs]
+        lines += [f"    - {b.text} (사실 {', '.join(b.fact_ids)})" for b in s.bullets]
     lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")
     lines += [f"{c.confirm_id} {c.text} -> {c.question}" for c in draft.to_confirm]
     lines += [f"경고: {n}" for n in draft.notices]

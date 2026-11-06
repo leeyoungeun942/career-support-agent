@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from core.llm_client import LLMClient, LLMRequest, MockClient
 from core.prompts import fill, load_prompt
-from core.writer_input import ToConfirm, WriterInput
+from core.writer_input import ToConfirm, UsableFact, WriterInput
 
 COVER_LETTER, PORTFOLIO = "cover_letter", "portfolio"
 KINDS = (COVER_LETTER, PORTFOLIO)
@@ -19,8 +19,7 @@ STAGE = {COVER_LETTER: "write_cover_letter", PORTFOLIO: "write_portfolio"}
 SECTIONS: dict[str, dict[str, str]] = {
     COVER_LETTER: {
         "motivation": "지원동기 및 입사 후 포부",
-        "job_experience": "직무 관련 경험과 역량",
-        "quality": "꼼꼼함·품질 관리 경험",
+        "job_experience": "직무 관련 경험과 역량 (품질·검수 사례도 여기에 쓴다)",
         "collaboration": "커뮤니케이션·주도적 업무 경험",
     },
     PORTFOLIO: {
@@ -33,8 +32,8 @@ SECTIONS: dict[str, dict[str, str]] = {
 }
 DATA_MARKER = "\n## 입력 데이터\n"
 DRAFT_BANNER = "초안입니다. 제출 전에 사실을 직접 확인하세요."
-VERIFICATION_NOTE = ("코드는 사실 id, 숫자, 영문 이름만 대조했다. 문장의 의미(과장, 새 성과, 프로필에 없는 태도 표현)는 검증하지 않았다. "
-                     "안전 검증을 마친 결과가 아니다.")
+VERIFICATION_NOTE = ("코드는 사실 id, 숫자, 영문 이름이 근거에 있는지만 대조했다. 문장의 의미(과장, 새 성과, 프로필에 없는 태도 표현)는 검증하지 않았다. "
+                     "경험 필드 내부의 범위(약, 이상)·역할·성과 의미도 검증하지 않았다. 안전 검증을 마친 결과가 아니다.")
 
 # 본문에서 확인하는 토큰: 숫자 덩어리와 영문 고유명(도구명, 자격증명 등). 정책 3장
 _NUMBER = re.compile(r"(?<![A-Za-z\d])\d+(?:[.,]\d+)*(?![A-Za-z])")  # B2B 같은 영문 이름 안의 숫자는 영문 토큰이 맡는다
@@ -49,10 +48,18 @@ class DraftError(Exception):
         self.code = code
 
 
-class DraftSection(BaseModel):
-    section: str
+class DraftItem(BaseModel):
+    """문단 또는 불릿 하나. 어떤 사실을 근거로 썼는지 fact_ids로 밝힌다."""
+
     text: str = Field(min_length=1)
     fact_ids: list[str] = []
+
+
+class DraftSection(BaseModel):
+    section: str
+    heading: str = Field(min_length=1)
+    paragraphs: list[DraftItem] = Field(min_length=1)  # 문단 수(2~4개)는 프롬프트 권장이고 스키마 조건이 아니다 (정책 4장)
+    bullets: list[DraftItem] = []
 
 
 class DraftResponse(BaseModel):
@@ -83,33 +90,42 @@ class ApplicationDraft(BaseModel):
     meta: DraftMeta
 
 
-_ID_KEYS = {"id", "experience_id", "fact_id", "requirement_id", "confirm_id", "forbidden_id", "item_index", "job_id", "level"}
-
-
-def _texts(obj) -> list[str]:
-    """값 안의 글만 모은다. id 같은 칸(exp-2, R2)은 근거가 되는 글이 아니라서 뺀다."""
-    if isinstance(obj, dict):
-        return [t for k, v in obj.items() if k not in _ID_KEYS for t in _texts(v)]
-    if isinstance(obj, list):
-        return [t for v in obj for t in _texts(v)]
-    return [str(obj)] if obj is not None else []
-
-
 JOB_CONTEXT_SECTIONS = {"motivation", "job_connection"}  # 공고와 연결하는 문맥. 여기서만 회사명·직무명·업무 항목의 토큰을 쓸 수 있다
 
 
-def _corpus(wi: WriterInput, section: str, fact_ids: list[str]) -> str:
-    """섹션 본문의 숫자·영문 토큰이 근거로 삼을 수 있는 글: 그 섹션이 인용한 사실의 문장·인용문·비교식.
+def _strings(obj) -> list[str]:
+    if isinstance(obj, list):
+        return [t for v in obj for t in _strings(v)]
+    return [str(obj)] if obj is not None else []
 
-    프로필 전체나 공고 요건은 근거가 아니다(인용하지 않은 경험, 확인 필요 요건의 토큰이 새는 것을 막는다).
-    연결 문맥의 섹션에서만 회사명, 직무명, 업무 항목을 더한다.
+
+def _fact_texts(fact: UsableFact) -> list[str]:
+    """사실 하나가 토큰의 근거로 내놓는 글: 문장, 비교식, 인용문, 근거 경험의 지정 칸. 식별자와 메타데이터는 뺀다 (정책 3장)."""
+    parts = [fact.text, fact.computed, *(e.quote for e in fact.evidence)]
+    for d in fact.evidence_detail:
+        parts += [d.role, *d.actions, *d.tools, d.result]
+    return _strings(parts)
+
+
+def _corpus(wi: WriterInput, section: str, fact_ids: list[str]) -> str:
+    """제목·문단·불릿의 숫자·영문 토큰이 근거로 삼을 수 있는 글: 그 단위가 단 fact_ids의 사실들.
+
+    프로필 전체나 공고 요건, 인용하지 않은 경험은 근거가 아니다. 연결 문맥의 섹션에서만 회사명, 직무명, 업무 항목을 더한다.
     """
-    cited = [f for f in wi.usable_facts if f.fact_id in fact_ids]
-    parts = [*_texts([f.model_dump() for f in cited])]
+    parts = [t for f in wi.usable_facts if f.fact_id in fact_ids for t in _fact_texts(f)]
     if section in JOB_CONTEXT_SECTIONS:
         j = wi.job
-        parts += _texts([j.company_name, j.job_title, j.position, j.main_tasks])
+        parts += _strings([j.company_name, j.job_title, j.position, j.main_tasks])
     return "\n".join(parts).casefold()
+
+
+def _check_tokens(text: str, corpus: str, where: str) -> None:
+    for token in _NUMBER.findall(text):
+        if not re.search(rf"(?<![A-Za-z\d.,]){re.escape(token)}(?![A-Za-z]|[.,]?\d)", corpus):  # 다른 숫자나 영문 이름(B2B 등)의 일부가 아닌 같은 숫자가 근거에 있어야 한다
+            raise DraftError("unsupported_token", f"{where}: {token}")
+    for token in _LATIN.findall(text):
+        if token.casefold() not in corpus:
+            raise DraftError("unsupported_token", f"{where}: {token}")
 
 
 def validate_draft(response: dict, wi: WriterInput, kind: str) -> list[DraftSection]:
@@ -122,20 +138,19 @@ def validate_draft(response: dict, wi: WriterInput, kind: str) -> list[DraftSect
         if s.section not in allowed or s.section in seen:
             raise DraftError("bad_section", s.section if s.section not in allowed else f"{s.section} 중복")
         seen.add(s.section)
-        if not s.fact_ids:
-            raise DraftError("missing_fact_id", s.section)
-        for fid in s.fact_ids:
-            if fid in forbidden:
-                raise DraftError("forbidden_fact_id", f"{s.section}: {fid}")
-            if fid not in facts:
-                raise DraftError("unknown_fact_id", f"{s.section}: {fid}")
-        corpus = _corpus(wi, s.section, s.fact_ids)
-        for token in _NUMBER.findall(s.text):
-            if not re.search(rf"(?<![A-Za-z\d.,]){re.escape(token)}(?![A-Za-z]|[.,]?\d)", corpus):  # 다른 숫자나 영문 이름(B2B 등)의 일부가 아닌 같은 숫자가 입력에 있어야 한다
-                raise DraftError("unsupported_token", f"{s.section}: {token}")
-        for token in _LATIN.findall(s.text):
-            if token.casefold() not in corpus:
-                raise DraftError("unsupported_token", f"{s.section}: {token}")
+        used: list[str] = []
+        for i, item in enumerate([*s.paragraphs, *s.bullets]):
+            where = f"{s.section}[{i}]"
+            if not item.fact_ids:
+                raise DraftError("missing_fact_id", where)
+            for fid in item.fact_ids:
+                if fid in forbidden:
+                    raise DraftError("forbidden_fact_id", f"{where}: {fid}")
+                if fid not in facts:
+                    raise DraftError("unknown_fact_id", f"{where}: {fid}")
+            _check_tokens(item.text, _corpus(wi, s.section, item.fact_ids), where)
+            used += item.fact_ids
+        _check_tokens(s.heading, _corpus(wi, s.section, used), f"{s.section} 제목")  # 제목의 근거는 섹션이 쓴 사실의 합집합이다
     return sections
 
 
@@ -150,7 +165,6 @@ def _data(wi: WriterInput) -> dict[str, str]:
     j = lambda obj: json.dumps(obj, ensure_ascii=False, indent=1)  # noqa: E731
     return {
         "job": j(wi.job.model_dump(exclude={"job_label"})),
-        "profile": j(wi.profile),
         "usable_facts": j([f.model_dump(exclude_none=True) for f in wi.usable_facts]),
         "to_confirm": j([{"confirm_id": c.confirm_id, "text": c.text} for c in wi.to_confirm]),
         "do_not_claim": j([{"forbidden_id": x.forbidden_id, "text": x.text} for x in wi.do_not_claim]),
