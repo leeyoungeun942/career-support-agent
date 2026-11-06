@@ -501,7 +501,7 @@ def test_evidence_detail_is_a_list_with_every_cited_experience_and_only_the_four
     dumped = facts["F3"].model_dump(include={"evidence_detail"})
     assert all(set(d) == {"experience_id", "role", "actions", "tools", "result"} for d in dumped["evidence_detail"])
     text = json.dumps(dumped, ensure_ascii=False)
-    for leaked in ("title", "period", "category", "2025-", "[개인]"):  # 제목·기간·분류값은 붙지 않는다
+    for leaked in ("title", "period", "category", "2025-", "[학회]"):  # 제목·기간·분류값은 붙지 않는다
         assert leaked not in text, leaked
 
 
