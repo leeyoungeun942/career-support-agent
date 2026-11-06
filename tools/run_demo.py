@@ -7,6 +7,10 @@
     python -m tools.run_demo --save-profile-evidence   # 저장 파일에 프로필 원문 인용도 넣는다 (가상 프로필 한정, 정책 16장)
     python -m tools.run_demo --select sample-3    # 고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(selected_job.v1 초안)로 저장한다
     python -m tools.run_demo --select sample-3 --save-profile-evidence   # 파일에 프로필 인용도 담는다 (가상 프로필 한정)
+    python -m tools.run_demo --select sample-3 --draft cover_letter   # 고른 공고로 자소서(cover_letter) 또는 포트폴리오(portfolio) 초안을 mock으로 만든다
+    python -m tools.run_demo --select sample-3 --draft portfolio --save-draft   # 초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)
+    python -m tools.run_demo --select sample-3 --draft cover_letter --ai --accept-free-tier-terms --model ... --rpm ... --rpd ...
+                                                  # 초안 작성 1회만 실제 Gemini. 자격요건과 게이트는 mock (가상 프로필과 샘플 공고만)
     python -m tools.run_demo --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
                                                   # 자격요건 단계만 실제 Gemini. 게이트의 AI 자리는 mock이다 (실제 연결은 이슈 #12)
 
@@ -16,6 +20,7 @@
 결과는 data/results/pipeline/<run_id>.json에 저장한다(커밋하지 않음). 기본으로는 프로필 원문 인용을 빼고 저장한다.
 선택 파일은 data/results/selection/<run_id>-<job_id>.json이다. 평가를 마치지 못한 공고는 선택할 수 없고, 불일치·미충족 공고는 경고 문구와 함께 선택할 수 있다.
 --ai의 안내, 동의, 하루 호출 예산 점검은 tools.eval_eligibility와 같다. 공고 원문은 data/sample-jobs/eligibility_sample_postings.json에서 읽는다.
+--draft는 기본 mock이다. --draft --ai는 초안 작성 호출 1회(재시도 포함 최대 4회)만 실제 Gemini로 보내고 자격요건과 게이트는 mock이다 (docs/policies/application-writing.md). 초안은 기본으로 저장하지 않고, 입력(WriterInput)은 어떤 경우에도 저장하지 않는다.
 화면에는 순위, 판정, 코드가 만든 사유 문구를 낸다. 프로필 인용, 공고 원문 전체, 모델 출력과 오류 내용은 출력하지 않는다.
 """
 import argparse
@@ -25,16 +30,21 @@ import sys
 from pathlib import Path
 
 from core.job_gate_mock import make_label_mock
+from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
 from core.pipeline_run import PipelineRun, ProfileRef
 from core.schemas import DISPLAY_LABELS
 from core.selection import JOB_ID_PATTERN, SelectedJob, SelectionRefused, select_job
+from core.writer_input import JobInfo, WriterInputError, build_writer_input
 from tools import eval_eligibility as ev
+from tools.ai_common import AiSetupError, prepare_session
 
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ev.RESULTS_DIR
 GATE_CASES_JSON = REPO / "data" / "sample-jobs" / "gate_sample_cases.json"
+WRITER_MOCK_JSON = REPO / "tests" / "fixtures" / "writer_mock_sample3.json"
 PROFILE_REF = ProfileRef(profile_id="kim-haneul", is_synthetic=True)  # fixture의 가상 프로필 (김하늘)
 EXIT_REFUSED = 2
 
@@ -205,6 +215,66 @@ def _select(saved: PipelineRun, args, posting_ref) -> int:
     return 0
 
 
+def _job_info(job_id: str, gate_cases_path: Path | None = None) -> JobInfo:
+    """초안 입력의 공고 내용. 회사명은 fixture에서, 직무명·업무 항목은 게이트 입력 파일이 있으면 거기서 읽는다(없으면 비운다)."""
+    samples, _, _, _ = ev.load_fixtures()
+    no = next(s["number"] for s in samples if s["job_id"] == job_id)
+    company = next(c["company"] for c in ev._read_json(ev.GATE_FIXTURE)["cases"] if c["no"] == no)
+    path = Path(gate_cases_path or GATE_CASES_JSON)
+    case = next((c for c in ev._read_json(path)["cases"] if c["no"] == no), None) if path.exists() else None
+    if case is None:
+        return JobInfo(company_name=company)
+    return JobInfo(company_name=company, job_title=case.get("job_title"), position=case.get("position"),
+                   main_tasks=[it["text"] for it in case["items"] if not it.get("exclude")])
+
+
+def save_draft(draft: ApplicationDraft, directory: Path) -> Path:
+    """초안을 directory/<run_id>-<job_id>-<kind>.json에 쓴다. 가상 프로필일 때만 쓰고, 같은 이름이 있으면 덮어쓰지 않는다 (정책 5장)."""
+    if not draft.is_synthetic:
+        raise ValueError("초안은 가상 프로필일 때만 저장할 수 있다 (정책 5장)")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{draft.run_id}-{draft.job_id}-{draft.kind}.json"
+    with path.open("x", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(json.loads(draft.model_dump_json()), ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
+    """초안을 화면에 낸다. 첫 줄에 mock / ai를 표시한다. 확인 필요 목록과 경고 문구는 코드가 붙인 것이다."""
+    kind = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}[draft.kind]
+    lines = [f"=== 초안: {kind} / writer: {draft.meta.mode} ({draft.meta.model}) / 공고 {draft.job_id} / 프롬프트 v{draft.meta.prompt_version} ===",
+             draft.banner, f"검증 한계: {draft.verification}"]
+    for s in draft.sections:
+        lines += [f"[{s.section}] (사실 {', '.join(s.fact_ids)})", f"    {s.text}"]
+    lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")
+    lines += [f"{c.confirm_id} {c.text} -> {c.question}" for c in draft.to_confirm]
+    lines += [f"경고: {n}" for n in draft.notices]
+    lines.append(f"저장: {saved.relative_to(REPO) if saved and saved.is_relative_to(REPO) else saved}" if saved else "저장하지 않았다 (--save-draft로 저장)")
+    return lines
+
+
+def _draft(run: PipelineRun, profile, args) -> int:
+    """고른 공고의 초안을 mock으로 만들어 보인다. 입력(WriterInput)은 메모리에만 있고 저장하지 않는다."""
+    try:
+        selected = select_job(run, args.select, include_profile_evidence=True)
+        wi = build_writer_input(selected, profile, _job_info(args.select, args.gate_cases))
+        client = getattr(args, "writer_client", None)
+        if client is None:  # mock: fixture의 초안을 돌려준다
+            answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
+            if args.select not in answers:
+                print(f"초안을 만들 수 없다: mock 초안이 {sorted(answers)}에만 있다", file=sys.stderr)
+                return EXIT_REFUSED
+            client = make_writer_mock(answers)
+        draft = write_application(wi, client, args.draft, allow_external_profile=getattr(args, "writer_client", None) is not None, mode=getattr(args, "writer_mode", "mock"))
+        path = save_draft(draft, RESULTS_DIR / "drafts") if args.save_draft else None
+    except (SelectionRefused, WriterInputError, DraftError, LLMStageError, LLMQuotaExceeded, PermissionError, ValueError, FileExistsError) as e:
+        print(f"초안을 만들지 못했다: {type(e).__name__}: {e}", file=sys.stderr)  # 메시지에는 초안·프로필 내용이 없다
+        return EXIT_REFUSED
+    print("\n".join(render_draft(draft, path)))
+    return 0
+
+
 def _finish(run: PipelineRun, args, posting_ref=lambda job_id: None) -> int:
     print("\n".join(render(run, args.quiet)))
     try:
@@ -217,6 +287,8 @@ def _finish(run: PipelineRun, args, posting_ref=lambda job_id: None) -> int:
     counts = saved.counts
     if args.select and _select(saved, args, posting_ref(args.select)):
         return EXIT_REFUSED
+    if args.draft and (draft_code := _draft(run, args.draft_profile, args)):
+        return draft_code
     if counts["not_run"]:
         return 3
     return 0 if counts["failed"] == 0 else 1
@@ -234,6 +306,7 @@ def run_mock(args) -> int:
     samples, _, evidence, _ = ev.load_fixtures()
     run = run_pipeline(jobs, profile, PROFILE_REF, make_extraction_mock(samples), make_evidence_mock(samples, evidence),
                        desired_family=desired)
+    args.draft_profile = profile  # 초안 입력에만 쓴다(저장하지 않는다)
     return _finish(run, args, lambda job_id: f"synthetic-posting:{job_id} (fixture에서 만든 합성 공고, 실제 원문이 아니다)")
 
 
@@ -266,6 +339,31 @@ def run_ai(args) -> int:
     return code
 
 
+def run_draft_ai(args) -> int:
+    """초안 작성 1회만 실제 Gemini로 보낸다. 자격요건과 게이트는 mock이다(가상 프로필과 샘플 공고만 나간다, 정책 5장).
+
+    동의, 설정, 하루 예산(재시도 포함 최대 시도)을 점검한 뒤에만 보낸다. 하나라도 안 되면 아무것도 보내지 않는다.
+    """
+    try:
+        build_scenario(args.gate, args.gate_cases)
+        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=1 + MAX_RETRIES, results_dir=RESULTS_DIR,
+                                  cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient)
+    except AiSetupError as e:
+        print(e, file=sys.stderr)
+        return e.code
+    except (ScenarioError, FileNotFoundError) as e:
+        print(f"실행할 수 없다: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    args.writer_client, args.writer_mode = session.client, "ai"
+    print(f"=== 초안 작성 실제 AI: {session.settings.model}, 실행 {session.usage.run_id}, 오늘 이미 사용 {session.calls_before}/{session.settings.rpd} "
+          f"(자격요건과 게이트는 mock) ===")
+    code = run_mock(args)
+    t, after = session.usage.run_totals(), session.usage.calls_today(session.settings.model)
+    print(f"이번 실행({session.usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
+          f"오늘 누적 {after}/{session.settings.rpd} (모델 {session.settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
+    return code
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--ai", action="store_true", help="자격요건 단계를 실제 Gemini로 실행 (가상 프로필과 샘플 공고만)")
@@ -273,6 +371,8 @@ def main(argv=None):
     p.add_argument("--gate", choices=("auto", "injected", "mock"), default="auto", help="게이트 결과를 만드는 방식")
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
     p.add_argument("--select", metavar="JOB_ID", help="고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(초안 형식)로 저장한다")
+    p.add_argument("--draft", choices=KINDS, help="고른 공고(--select)의 자소서 또는 포트폴리오 초안을 만든다 (mock만)")
+    p.add_argument("--save-draft", action="store_true", help="초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)")
     p.add_argument("--save-profile-evidence", action="store_true", help="저장 파일에 프로필 원문 인용을 넣는다 (가상 프로필 한정)")
     p.add_argument("--cache-profile", action="store_true", help="근거 찾기 결과를 디스크에 캐시한다(가상 프로필 개발용)")
     p.add_argument("--fresh-cache", action="store_true", help="이번 실행만의 공고 추출 캐시를 쓴다(모델 비교용)")
@@ -283,6 +383,15 @@ def main(argv=None):
     p.add_argument("--postings", default=str(ev.POSTINGS_JSON), help="공고 원문 JSON 경로 (--ai)")
     p.add_argument("-q", "--quiet", action="store_true", help="공고 id·순위·코드만 출력")
     args = p.parse_args(argv)
+    args.draft_profile = None
+    if args.draft and not args.select:
+        p.error("--draft는 --select와 함께 쓴다")
+    if args.save_draft and not args.draft:
+        p.error("--save-draft는 --draft와 함께 쓴다")
+    if args.draft and args.real_profile:
+        p.error("--real-profile은 구현하지 않았다")
+    if args.draft and args.ai:
+        sys.exit(run_draft_ai(args))
     if args.ai or args.real_profile:
         sys.exit(run_ai(args))
     sys.exit(run_mock(args))

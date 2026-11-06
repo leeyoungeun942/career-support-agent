@@ -564,7 +564,7 @@
 - 인용을 뺀 파일도 **개인정보로 취급한다.** `interpretation_note`와 `question_for_user`는 모델이 쓸 수 있어 프로필 내용이 섞일 수 있고, 인용이 없는 `met`은 원본 프로필 없이는 다시 검증할 수 없다. 그래서 인용을 뺀 것은 "원문이 그대로 남지 않게 줄인 것"이고 공유해도 되는 파일이 아니다.
 - 공고 원문은 저장하지 않는다. `job_quote`와 요건 `text`에 공고 원문의 일부가 들어 있으므로 실제 공고를 쓸 때는 공개 범위를 먼저 정한다.
 
-## 4. 선택한 공고의 전달 (`selected_job.v1`) — **내부 초안, 자소서·포트폴리오 생성 이슈에서 확장 예정**
+## 4. 선택한 공고의 전달 (`selected_job.v1`) — **내부 초안.** 초안 생성의 입력은 4-1
 
 사용자가 `ranking`에서 1건을 고르면 그 공고를 자소서·포트폴리오 Agent에 넘기기 위한 형식이다. 자소서·포트폴리오 생성은 같은 저장소 안에서 이어서 구현하므로 팀 사이의 계약이 아니라 **내부 형식**이다. 무엇을 받아야 하는지는 생성 쪽 정책을 정하면서 확정하고, 그때 칸을 늘리거나 바꾼다. 이 초안은 "선택한 공고의 판정 결과를 잃지 않고 넘기는 최소 칸"이다. 공고 내용(업무 항목, 요건 목록)과 프로필 내용은 아직 담지 않는다. 생성 이슈에서 함수 호출로 넘기는 입력(`WriterInput`)을 새로 정의할 때 정한다.
 
@@ -600,6 +600,25 @@
 - **`not_eligible`이나 참고용 공고도 선택은 막지 않는다.** 선택은 사용자의 결정이다. 대신 경고 코드와 문구가 따라간다.
 - **받는 쪽은 경고를 지우거나 덮어쓰지 않는다**(계약). 이 형식만으로는 받는 쪽 코드가 경고를 지우는 것을 막을 수 없으므로, 생성 쪽 정책에 이 문장을 포함한다. 경고는 결과에서 계산하므로 입력으로 받지 않는다.
 - **개인정보.** 인용이 든 파일은 `data/results/`에만 쓰고 커밋하지 않는다. 자소서 Agent가 외부 LLM을 쓰면 이 내용이 외부로 나가므로 정책 16장의 같은 제한(가상 프로필만, 별도 승인 없이는 실제 프로필 금지)이 그대로 적용되고, 받는 쪽이 전달받을 때 다시 검사한다. 자동 삭제는 없고 필요 없어지면 손으로 지운다.
+
+### 4-1. 초안 생성의 입력과 결과 (`WriterInput`, `ApplicationDraft`) — 이슈 #14
+
+`SelectedJob`(`selected_job.v1`)은 바꾸지 않았다. 공고 내용과 프로필 내용은 `SelectedJob`에 넣지 않고, 함수 호출로 넘기는 별도 내부 모델이 가진다. 규칙은 `docs/policies/application-writing.md`다.
+
+```
+select_job(run, job_id, include_profile_evidence=True) -> SelectedJob
+build_writer_input(selected, profile, info) -> WriterInput          (core/writer_input.py, LLM 없음)
+write_application(writer_input, client, kind) -> ApplicationDraft   (agents/application_writer.py)
+```
+
+| 모델 | 칸 |
+|---|---|
+| `WriterInput` (`writer_input.v1`, **저장하지 않는다**) | `job`(`job_id`, `job_label`, `company_name`, `job_title`, `position`, `main_tasks`, `requirements`), `profile`(`profile_payload`와 같은 칸, 이름·연락처 없음), `usable_facts`(`F1`…), `to_confirm`(`C1`…), `do_not_claim`(`X1`…), `notices`(`SelectedJob`의 경고 문구 복사), `meta`(`run_id`, `job_id`, `profile_id`, `is_synthetic`) |
+| `ApplicationDraft` | `kind`(`cover_letter` / `portfolio`), `job_id`, `run_id`, `profile_id`, `is_synthetic`, `sections[]`(`section`, `text`, `fact_ids`), `to_confirm`(코드가 복사), `notices`(코드가 복사), `banner`, `meta`(`mode` mock/ai, `model`, `prompt_version`, 토큰) |
+
+- 분류와 검증 규칙은 정책 2~3장이다. 확인 필요 목록과 경고 문구는 모델이 쓰지 않고 코드가 입력에서 복사한다.
+- `build_writer_input`은 프로필 인용을 담은 `SelectedJob`만 받는다. 실행 결과를 메모리에서 바로 고르면(`select_job(run, ..., include_profile_evidence=True)`) 인용이 있고, 인용을 뺀 저장 파일에서는 만들 수 없다.
+- 초안 파일은 `--draft ... --save-draft`일 때만 `data/results/drafts/<run_id>-<job_id>-<kind>.json`에 쓴다(가상 프로필 한정, 커밋하지 않음). `WriterInput`은 어떤 경우에도 쓰지 않는다.
 
 ---
 
