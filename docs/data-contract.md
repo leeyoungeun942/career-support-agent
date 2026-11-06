@@ -618,7 +618,7 @@ write_application(writer_input, client, kind) -> ApplicationDraft   (agents/appl
 
 - 분류와 검증 규칙은 정책 2~3장이다. 확인 필요 목록과 경고 문구는 모델이 쓰지 않고 코드가 입력에서 복사한다.
 - `build_writer_input`은 프로필 인용을 담은 `SelectedJob`만 받는다. 실행 결과를 메모리에서 바로 고르면(`select_job(run, ..., include_profile_evidence=True)`) 인용이 있고, 인용을 뺀 저장 파일에서는 만들 수 없다.
-- 초안 파일은 `--draft ... --save-draft`일 때만 `data/results/drafts/<run_id>-<job_id>-<kind>.json`에 쓴다(가상 프로필 한정, 커밋하지 않음). `WriterInput`은 어떤 경우에도 쓰지 않는다. **`evidence_detail`은 프로필 원문이므로 저장·캐시·로그·오류 메시지에 넣지 않는다**(`WriterInput`과 같은 저장 금지 대상).
+- 초안 파일은 `--draft ... --save-draft`일 때만 `data/results/drafts/<run_id>-<job_id>-<kind>.json`에 쓴다(가상 프로필 한정, 커밋하지 않음). 실제 AI 초안(`writer: ai`)은 사람이 읽는 확인용 `.md`를 `--save-draft` 없이도 같은 이름으로 쓴다(정책 5장 D13). `WriterInput`은 어떤 경우에도 쓰지 않는다. **`evidence_detail`은 프로필 원문이므로 저장·캐시·로그·오류 메시지에 넣지 않는다**(`WriterInput`과 같은 저장 금지 대상).
 - #21(2026-11-06)에서 `ApplicationDraft.sections`의 모양이 바뀌었다(`text` 단독 → `heading` + 문단 + 불릿). 저장된 초안을 읽는 코드가 없고 초안은 기본으로 저장하지 않으므로 이전 변환기는 만들지 않는다.
 
 ---
