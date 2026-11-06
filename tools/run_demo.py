@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 from core.job_gate_mock import make_label_mock
-from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from agents.application_writer import KINDS, SECTIONS, ApplicationDraft, DraftError, make_writer_mock, write_application
 from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
@@ -240,9 +240,44 @@ def save_draft(draft: ApplicationDraft, directory: Path) -> Path:
     return path
 
 
-def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
+KIND_LABEL = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}
+
+
+def draft_markdown(draft: ApplicationDraft) -> str:
+    """사람이 전체를 읽는 확인용 md. 화면에 내는 초안과 같은 내용이다(소제목, 문단, 불릿, 근거 사실 id, 확인 필요, 경고, 검증 한계)."""
+    ids = lambda xs: f"*(근거 사실 {', '.join(xs)})*"  # noqa: E731
+    lines = [f"# {KIND_LABEL[draft.kind]} 초안: 공고 {draft.job_id}", "",
+             f"> writer: {draft.meta.mode} ({draft.meta.model}) · 프롬프트 v{draft.meta.prompt_version} · 실행 {draft.run_id} · 가상 프로필 {draft.profile_id}",
+             f"> {draft.banner}", f"> 검증 한계: {draft.verification}", ""]
+    for sec in draft.sections:
+        lines += [f"## {sec.heading}", "", f"*섹션: {SECTIONS[draft.kind][sec.section]} (`{sec.section}`)*", ""]
+        for para in sec.paragraphs:
+            lines += [para.text, "", ids(para.fact_ids), ""]
+        lines += [f"- {b.text} {ids(b.fact_ids)}" for b in sec.bullets]
+        if sec.bullets:
+            lines.append("")
+    lines += [f"## 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다)", ""]
+    lines += [f"- {c.confirm_id} {c.text} → {c.question}" for c in draft.to_confirm]
+    if draft.notices:
+        lines += [""] + [f"**경고: {n}**" for n in draft.notices]
+    return "\n".join(lines) + "\n"
+
+
+def save_draft_md(draft: ApplicationDraft, directory: Path) -> Path:
+    """확인용 md를 directory/<run_id>-<job_id>-<kind>.md에 쓴다. 가상 프로필일 때만 쓰고, 같은 이름이 있으면 덮어쓰지 않는다 (정책 5장 D13)."""
+    if not draft.is_synthetic:
+        raise ValueError("초안은 가상 프로필일 때만 저장할 수 있다 (정책 5장)")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{draft.run_id}-{draft.job_id}-{draft.kind}.md"
+    with path.open("x", encoding="utf-8", newline="\n") as f:
+        f.write(draft_markdown(draft))
+    return path
+
+
+def render_draft(draft: ApplicationDraft, saved: Path | None, md: Path | None = None) -> list[str]:
     """초안을 화면에 낸다. 첫 줄에 mock / ai를 표시한다. 확인 필요 목록과 경고 문구는 코드가 붙인 것이다."""
-    kind = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}[draft.kind]
+    kind = KIND_LABEL[draft.kind]
     lines = [f"=== 초안: {kind} / writer: {draft.meta.mode} ({draft.meta.model}) / 공고 {draft.job_id} / 프롬프트 v{draft.meta.prompt_version} ===",
              draft.banner, f"검증 한계: {draft.verification}"]
     for s in draft.sections:
@@ -252,7 +287,10 @@ def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
     lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")
     lines += [f"{c.confirm_id} {c.text} -> {c.question}" for c in draft.to_confirm]
     lines += [f"경고: {n}" for n in draft.notices]
-    lines.append(f"저장: {saved.relative_to(REPO) if saved and saved.is_relative_to(REPO) else saved}" if saved else "저장하지 않았다 (--save-draft로 저장)")
+    rel = lambda path: path.relative_to(REPO) if path.is_relative_to(REPO) else path  # noqa: E731
+    lines.append(f"저장: {rel(saved)}" if saved else "저장하지 않았다 (--save-draft로 저장)")
+    if md:
+        lines.append(f"확인용 md: {rel(md)} (커밋하지 않는 파일)")
     return lines
 
 
@@ -270,10 +308,11 @@ def _draft(run: PipelineRun, profile, args) -> int:
             client = make_writer_mock(answers)
         draft = write_application(wi, client, args.draft, allow_external_profile=getattr(args, "writer_client", None) is not None, mode=getattr(args, "writer_mode", "mock"))
         path = save_draft(draft, RESULTS_DIR / "drafts") if args.save_draft else None
+        md = save_draft_md(draft, RESULTS_DIR / "drafts") if args.save_draft or draft.meta.mode == "ai" else None  # 실제 AI 초안은 플래그 없이도 (정책 5장 D13)
     except (SelectionRefused, WriterInputError, DraftError, LLMStageError, LLMQuotaExceeded, PermissionError, ValueError, FileExistsError) as e:
         print(f"초안을 만들지 못했다: {type(e).__name__}: {e}", file=sys.stderr)  # 메시지에는 초안·프로필 내용이 없다
         return EXIT_REFUSED
-    print("\n".join(render_draft(draft, path)))
+    print("\n".join(render_draft(draft, path, md)))
     return 0
 
 

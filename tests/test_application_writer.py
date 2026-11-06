@@ -620,3 +620,55 @@ def test_portfolio_screen_prints_headings_paragraphs_and_bullets(tmp_path, capsy
     out = capsys.readouterr().out
     assert "[highlight_experiences] 포트폴리오에서 강조하면 좋은 경험" in out and "    - 챗봇 시나리오와 예외 처리 가이드 작성" in out
     assert "(사실 F3)" in out
+
+
+# ---------------------------------------------------------------- 실제 AI 초안은 확인용 md를 쓴다 (정책 5장 D13, #23)
+
+@pytest.mark.parametrize("kind", aw.KINDS)
+def test_real_ai_draft_writes_a_review_md_without_the_save_flag(draft_ai, results, capsys, kind):
+    assert main(*AI, "--draft", kind) == 0
+    out = capsys.readouterr().out
+    files = list((results / "drafts").glob("*"))
+    assert [f.suffix for f in files] == [".md"] and files[0].name.endswith(f"-sample-3-{kind}.md")  # json은 --save-draft일 때만
+    md = files[0].read_text(encoding="utf-8")
+    draft = write_application(writer_input(), make_writer_mock(MOCK_ANSWERS), kind)
+    assert md.startswith("# " + demo.KIND_LABEL[kind] + " 초안") and "writer: ai (m-test)" in md
+    for sec in draft.sections:  # 소제목, 문단 전체, 불릿, 근거 사실 id가 모두 있다
+        assert f"## {sec.heading}" in md
+        assert all(para.text in md for para in sec.paragraphs) and all(b.text in md for b in sec.bullets)
+    assert "근거 사실 F1" in md and "## 확인 필요 1개" in md and "C1 생성형 AI 도구를 자유자재로 활용" in md
+    assert "검증 한계:" in md and aw.DRAFT_BANNER in md
+    assert "확인용 md:" in out and files[0].name in out
+    for secret in ("evidence_detail", "SQL 기초", "ADsP", "010", "김하늘"):  # 프로필 전체·식별 정보는 들어가지 않는다
+        assert secret not in md
+
+
+def test_real_ai_draft_md_is_not_written_when_the_draft_is_rejected(draft_ai, results, capsys):
+    DraftRouting.answer_override = response(("motivation", "인턴 경험이 있습니다.", ["X9"]))
+    assert main(*AI, "--draft", "cover_letter") == 2
+    assert not (results / "drafts").exists()
+
+
+def test_mock_draft_writes_md_only_with_the_save_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(demo, "RESULTS_DIR", tmp_path)
+    with pytest.raises(SystemExit):
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter"])
+    assert not (tmp_path / "drafts").exists()
+    with pytest.raises(SystemExit):
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter", "--save-draft"])
+    assert sorted(f.suffix for f in (tmp_path / "drafts").glob("*")) == [".json", ".md"]
+
+
+def test_review_md_is_not_written_for_a_real_profile_and_never_overwrites(tmp_path):
+    draft = write_application(writer_input(), make_writer_mock(MOCK_ANSWERS), "portfolio")
+    with pytest.raises(ValueError, match="가상 프로필"):
+        demo.save_draft_md(draft.model_copy(update={"is_synthetic": False}), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    path = demo.save_draft_md(draft, tmp_path)
+    assert "[highlight_experiences]" not in path.read_text(encoding="utf-8") and "(`highlight_experiences`)" in path.read_text(encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        demo.save_draft_md(draft, tmp_path)
+
+
+def test_policy_documents_the_review_md():
+    assert "확인용 md" in POLICY and "D13" in POLICY and "--save-draft" in POLICY
