@@ -324,12 +324,28 @@ def _task_links(args, profile, selected, info):
                       is_synthetic=selected.profile.is_synthetic, job_id=args.select)
 
 
+def render_links(links, tasks) -> list[str]:
+    """업무 연결 후보를 화면에 낸다(사람이 읽고 확정하는 용도). 저장하지 않는다."""
+    lines = [f"=== 업무 연결 후보 {len(links)}개 / 주요 업무 {len(tasks)}개 (사실이 아니고 판정이 아니다, 저장하지 않았다) ==="]
+    for t in links:
+        lines.append(f"{t.task_id} {t.text}")
+        lines += [f"    - [{e.experience_id}] {e.quote}" for e in t.evidence]
+    none = [f"T{i}" for i in range(1, len(tasks) + 1) if f"T{i}" not in {t.task_id for t in links}]
+    if none:
+        lines.append(f"후보가 없는 업무: {', '.join(none)}")
+    return lines
+
+
 def _draft(run: PipelineRun, profile, args) -> int:
     """고른 공고의 초안을 mock으로 만들어 보인다. 입력(WriterInput)은 메모리에만 있고 저장하지 않는다."""
     try:
         selected = select_job(run, args.select, include_profile_evidence=True)
         info = _job_info(args.select, args.gate_cases)
-        wi = build_writer_input(selected, profile, info, task_links=_task_links(args, profile, selected, info))
+        links = _task_links(args, profile, selected, info)
+        if args.links_only:  # 연결 후보만 만들어 화면에 보이고 초안은 쓰지 않는다(사람이 읽고 확정하기 위해)
+            print("\n".join(render_links(links, info.main_tasks)))
+            return 0
+        wi = build_writer_input(selected, profile, info, task_links=links)
         client = getattr(args, "writer_client", None)
         if client is None:  # mock: fixture의 초안을 돌려준다
             answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
@@ -418,7 +434,7 @@ def run_draft_ai(args) -> int:
     """
     try:
         build_scenario(args.gate, args.gate_cases)
-        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=(1 + MAX_RETRIES) * (2 if args.task_links == "ai" else 1), results_dir=RESULTS_DIR,
+        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=(1 + MAX_RETRIES) * (2 if args.task_links == "ai" and not args.links_only else 1), results_dir=RESULTS_DIR,
                                   cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient)
     except AiSetupError as e:
         print(e, file=sys.stderr)
@@ -446,6 +462,7 @@ def main(argv=None):
     p.add_argument("--draft", choices=KINDS, help="고른 공고(--select)의 자소서 또는 포트폴리오 초안을 만든다 (mock만)")
     p.add_argument("--task-links", choices=("none", "fixture", "ai"), default="none",
                    help="초안에 주요 업무 연결 후보를 더한다. none=없음(기본), fixture=사람이 확정한 합성 fixture, ai=연결 후보 호출 1회(--ai일 때만, 결과는 저장하지 않는다)")
+    p.add_argument("--links-only", action="store_true", help="업무 연결 후보만 만들어 화면에 보인다(초안은 쓰지 않는다, --task-links fixture|ai와 함께)")
     p.add_argument("--save-draft", action="store_true", help="초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)")
     p.add_argument("--save-profile-evidence", action="store_true", help="저장 파일에 프로필 원문 인용을 넣는다 (가상 프로필 한정)")
     p.add_argument("--cache-profile", action="store_true", help="근거 찾기 결과를 디스크에 캐시한다(가상 프로필 개발용)")
@@ -464,6 +481,8 @@ def main(argv=None):
         p.error("--save-draft는 --draft와 함께 쓴다")
     if args.task_links != "none" and not args.draft:
         p.error("--task-links는 --draft와 함께 쓴다")
+    if args.links_only and args.task_links == "none":
+        p.error("--links-only는 --task-links fixture 또는 ai와 함께 쓴다")
     if args.task_links == "ai" and not args.ai:
         p.error("--task-links ai는 --ai와 함께 쓴다")
     if args.draft and args.real_profile:

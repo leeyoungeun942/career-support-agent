@@ -703,3 +703,21 @@ def test_task_links_are_never_written_by_a_real_ai_run(draft_ai, results, capsys
 def test_task_links_none_is_the_default_and_sends_no_link_call(draft_ai, capsys):
     assert main(*AI, "--draft", "cover_letter") == 0
     assert [r.stage for r in draft_ai[0].requests] == ["write_cover_letter"]
+
+
+def test_links_only_makes_one_link_call_shows_the_links_and_writes_no_draft(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--links-only", "--draft", "cover_letter") == 0
+    out = capsys.readouterr().out
+    assert [r.stage for r in draft_ai[0].requests] == ["link_tasks"]  # 초안 호출은 없다
+    assert Routing.needed == 1 + MAX_RETRIES  # 예산도 연결 후보 호출 하나분
+    assert "업무 연결 후보 5개 / 주요 업무 5개" in out and "저장하지 않았다" in out and "T1 " in out and "[exp-3]" in out
+    assert not (results / "drafts").exists()  # 초안도 md도 쓰지 않는다
+
+
+def test_links_only_needs_a_task_links_mode_and_prints_tasks_without_candidates():
+    with pytest.raises(SystemExit) as e:
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter", "--links-only"])
+    assert e.value.code == 2
+    lines = demo.render_links([], ["업무 하나", "업무 둘"])
+    assert lines[0].startswith("=== 업무 연결 후보 0개 / 주요 업무 2개") and lines[-1] == "후보가 없는 업무: T1, T2"
+
