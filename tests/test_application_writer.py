@@ -731,3 +731,12 @@ def test_fixture_mode_through_the_cli_sends_task_names_and_no_task_sentence(draf
     assert all(sentence not in everything for sentence in fx["tasks"])  # 공고 정보에도 연결 후보에도 업무 문장이 없다
     assert all(label in req.prompt for label in fx["labels"]) and req.prompt_version.endswith("+names")
 
+
+def test_fixture_mode_works_without_the_local_gate_file(draft_ai, monkeypatch, capsys):
+    """로컬 공고 입력(git 제외)이 없어도 고정본의 업무로 이름과 짝을 맞춘다."""
+    from core.writer_input import JobInfo
+    monkeypatch.setattr(demo, "_job_info", lambda job_id, path=None: JobInfo(company_name="회사", job_title="직무"))
+    assert main(*AI, "--task-links", "fixture", "--draft", "cover_letter") == 0
+    capsys.readouterr()
+    assert draft_ai[0].requests[0].prompt_version.endswith("+names")
+
