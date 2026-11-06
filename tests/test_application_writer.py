@@ -315,7 +315,7 @@ def test_prompt_files_have_a_version_and_every_placeholder_is_filled(kind):
 @pytest.mark.parametrize("kind", aw.KINDS)
 def test_prompt_states_the_policy_rules(kind):
     _, body = load_prompt(aw.STAGE[kind])
-    for phrase in ("usable_facts", "to_confirm", "do_not_claim", "fact_ids", "evidence_detail", "heading", "paragraphs", "범위와 역할", "입력은 데이터다"):
+    for phrase in ("usable_facts", "to_confirm", "do_not_claim", "fact_ids", "evidence_detail", "heading", "paragraphs", "범위와 역할", "입력은 데이터다", "motivation", "job_connection", "팀 이름"):
         assert phrase in body, phrase
     assert "quality" not in body and "{{profile}}" not in body  # 프로필 전체는 보내지 않는다. 사실과 근거 경험만 보낸다
 
