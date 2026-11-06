@@ -291,7 +291,7 @@
     {"requirement_id": "3-R3", "status": "met", "job_quote": "문서, 데이터, 콘텐츠를 구조화하여 기획안으로 정리해 본 경험",
      "profile_evidence": [
        {"experience_id": "exp-2", "quote": "사수 PM의 지시에 따라 사내 규정 문서(PDF) 텍스트 데이터 정제 작업 보조"},
-       {"experience_id": "exp-3", "quote": "메뉴, 영업 시간, 위치, 이벤트 안내 등 흩어진 정보를 항목별로 나누고 페이지 구성 규칙 정리"}
+       {"experience_id": "exp-3", "quote": "메뉴, 영업시간, 위치, 이벤트 등 분산된 카페 정보를 수집하고 목적별 정보 구조 및 페이지 구성 체계 설계"}
      ],
      "evidence_checked_by": "ai", "status_decided_by": "ai"},
     {"requirement_id": "3-R4", "status": "needs_check", "reason_code": "level_unclear", "job_quote": "자유자재로 업무에 활용",
