@@ -31,6 +31,7 @@ class JobInfo(BaseModel):
     job_title: str | None = None
     position: str | None = None
     main_tasks: list[str] = []
+    task_labels: list[str] = []  # main_tasks와 같은 순서의 업무 이름. 있으면 프롬프트에는 업무 문장 대신 이름을 준다 (정책 2장 D20)
 
 
 class JobRequirementText(BaseModel):
@@ -135,6 +136,7 @@ class WriterJob(BaseModel):
     job_title: str | None = None
     position: str | None = None
     main_tasks: list[str] = []
+    task_labels: list[str] = []
     requirements: list[JobRequirementText]
 
 
@@ -209,7 +211,7 @@ def build_writer_input(selected: SelectedJob, profile: EligibilityProfile, info:
     info = info or JobInfo()
     return WriterInput(
         job=WriterJob(job_id=selected.job_id, job_label=selected.job_label, company_name=info.company_name, job_title=info.job_title,
-                      position=info.position, main_tasks=info.main_tasks,
+                      position=info.position, main_tasks=info.main_tasks, task_labels=info.task_labels,
                       requirements=[JobRequirementText(requirement_id=r.id, level=r.level, text=r.text)
                                     for r in selected.eligibility.requirements if r.type != "preference"]),
         profile=profile_payload(profile),

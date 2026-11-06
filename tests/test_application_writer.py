@@ -721,3 +721,13 @@ def test_links_only_needs_a_task_links_mode_and_prints_tasks_without_candidates(
     lines = demo.render_links([], ["업무 하나", "업무 둘"])
     assert lines[0].startswith("=== 업무 연결 후보 0개 / 주요 업무 2개") and lines[-1] == "후보가 없는 업무: T1, T2"
 
+
+def test_fixture_mode_through_the_cli_sends_task_names_and_no_task_sentence(draft_ai, capsys):
+    fx = json.loads(demo.TASK_LINKS_JSON.read_text(encoding="utf-8"))["sample-3"]
+    assert main(*AI, "--task-links", "fixture", "--draft", "cover_letter") == 0
+    capsys.readouterr()
+    req = draft_ai[0].requests[0]
+    everything = req.prompt + (req.system or "")
+    assert all(sentence not in everything for sentence in fx["tasks"])  # 공고 정보에도 연결 후보에도 업무 문장이 없다
+    assert all(label in req.prompt for label in fx["labels"]) and req.prompt_version.endswith("+names")
+

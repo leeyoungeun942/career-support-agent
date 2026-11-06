@@ -48,7 +48,7 @@ DRAFT_BANNER = "초안입니다. 제출 전에 사실을 직접 확인하세요.
 # task_ids만 있는 문단이 자격요건 충족·역량 보유·요건 수준을 주장할 때 쓰는 명시적 표현 (정책 3장). 표면 검사라 바꿔 쓴 표현은 못 잡는다
 TASK_ONLY_CLAIMS = ("충족", "갖추", "수행할 수 있", "해낼 수 있", "능숙", "숙달", "전문가")
 TASK_LINK_VERSION_SUFFIX = "+links"
-TASK_LINK_LABEL_VERSION_SUFFIX = "+labels"  # 업무 문장 대신 업무 이름을 준 경우
+TASK_LINK_LABEL_VERSION_SUFFIX = "+names"  # 연결 후보와 공고 정보 모두에서 업무 문장 대신 업무 이름만 준 경우 (+labels는 7-4의 연결 후보만 이름)
 VERIFICATION_NOTE = ("코드는 사실 id, 숫자, 영문 이름이 근거에 있는지만 대조했다. 문장의 의미(과장, 새 성과, 프로필에 없는 태도 표현)는 검증하지 않았다. "
                      "경험 필드 내부의 범위(약, 이상)·역할·성과 의미도 검증하지 않았다. 안전 검증을 마친 결과가 아니다.")
 
@@ -205,12 +205,21 @@ def _split(body: str) -> tuple[str, str]:
     return head, DATA_MARKER.lstrip("\n") + tail
 
 
+def _names_only(wi: WriterInput) -> bool:
+    """업무 이름(label)이 모든 업무와 모든 연결 후보에 있으면 프롬프트에는 업무 문장 대신 이름만 준다."""
+    labels = wi.job.task_labels
+    return bool(wi.task_links) and len(labels) == len(wi.job.main_tasks) > 0 and all(t.label for t in wi.task_links)
+
+
 def _data(wi: WriterInput) -> dict[str, str]:
     j = lambda obj: json.dumps(obj, ensure_ascii=False, indent=1)  # noqa: E731
     # 업무 이름(label)이 있으면 프롬프트에는 업무 문장(text)을 빼고 이름만 준다 (정책 2장 D20)
     links = j([t.model_dump(exclude={"text"}) if t.label else t.model_dump(exclude={"label"}) for t in wi.task_links])
+    job = wi.job.model_dump(exclude={"job_label", "task_labels"})
+    if _names_only(wi):  # 업무 문장은 연결 후보와 공고 정보 어디에도 주지 않는다 (정책 2장 D20)
+        job["main_tasks"] = list(wi.job.task_labels)
     return {
-        "job": j(wi.job.model_dump(exclude={"job_label"})),
+        "job": j(job),
         "usable_facts": j([f.model_dump(exclude_none=True) for f in wi.usable_facts]),
         "to_confirm": j([{"confirm_id": c.confirm_id, "text": c.text} for c in wi.to_confirm]),
         "do_not_claim": j([{"forbidden_id": x.forbidden_id, "text": x.text} for x in wi.do_not_claim]),
@@ -239,7 +248,7 @@ def write_application(wi: WriterInput, client: LLMClient, kind: str, allow_exter
     sections_text = json.dumps(SECTIONS[kind], ensure_ascii=False, indent=1)
     link_rules = TASK_LINK_RULES if wi.task_links else ""  # 연결 후보가 없으면 프롬프트에 연결 후보 문장이 하나도 없다(기준선과 같은 내용)
     if wi.task_links:
-        labeled = all(t.label for t in wi.task_links)
+        labeled = _names_only(wi)
         version += TASK_LINK_LABEL_VERSION_SUFFIX if labeled else TASK_LINK_VERSION_SUFFIX
         link_rules += TASK_LINK_LABEL_RULE if labeled else ""
     request = LLMRequest(stage=STAGE[kind], prompt=fill(data_frame, **_data(wi)),

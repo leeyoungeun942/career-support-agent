@@ -189,25 +189,37 @@ LABELS = FIXTURE["labels"]
 LABELED = build_links(PROFILE, TASKS, {"links": FIXTURE["links"]}, labels=LABELS)
 
 
-def wi_labeled():
+def wi_labeled(task_labels=True):
     sel = select_job(RUN, "sample-3", include_profile_evidence=True)
-    return build_writer_input(sel, PROFILE, JobInfo(main_tasks=list(TASKS)), task_links=LABELED)
+    info = JobInfo(company_name="이씨이십일알앤씨(주)", job_title="정보제공 AI 에이전트 구축을 위한 기획 담당자 모집", main_tasks=list(TASKS),
+                   task_labels=list(LABELS) if task_labels else [])
+    return build_writer_input(sel, PROFILE, info, task_links=LABELED)
 
 
 def test_the_fixture_has_one_label_per_task_and_links_carry_them():
     assert len(LABELS) == len(TASKS) == 5 and [t.label for t in LABELED] == LABELS
 
 
-def test_with_labels_the_prompt_gets_the_label_but_not_the_task_sentence():
+def test_with_names_no_task_sentence_is_anywhere_in_the_prompt_only_the_names():
     client = FakeClient([para("글", task_ids=["T1"])])
     write_application(wi_labeled(), client, "cover_letter")
     req = client.requests[0]
+    everything = req.prompt + (req.system or "")
+    for sentence in TASKS:  # 연결 후보에도 공고 정보(main_tasks)에도 업무 문장이 없다 (7-4의 빈틈)
+        assert sentence not in everything
+        assert sentence[:15] not in everything
     for label in LABELS:
         assert label in req.prompt
-    for sentence in TASKS:  # 업무 문장은 프롬프트의 연결 후보에 없다
-        assert sentence not in req.prompt.split("업무 연결 후보 (task_links")[1]
-    assert req.prompt_version == load_prompt(aw.STAGE["cover_letter"])[0] + "+labels"
+    assert req.prompt_version == load_prompt(aw.STAGE["cover_letter"])[0] + "+names"
     assert "공고가 업무에 붙인 이름" in req.system and "입사 후 포부 문장에서만" in req.system
+    assert "task_labels" not in req.prompt  # 내부 칸 이름이 새지 않는다
+
+
+def test_links_with_names_but_a_job_without_names_still_shows_the_sentences():
+    client = FakeClient([para("글", task_ids=["T1"])])
+    write_application(wi_labeled(task_labels=False), client, "cover_letter")
+    req = client.requests[0]
+    assert TASKS[0] in req.prompt and req.prompt_version.endswith("+links")  # 이름이 모든 업무에 없으면 이전 방식으로 둔다
 
 
 def test_without_labels_nothing_changes_from_the_task_sentence_version():

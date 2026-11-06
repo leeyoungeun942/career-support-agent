@@ -319,6 +319,9 @@ def _task_links(args, profile, selected, info):
         entry = {k: v for k, v in json.loads(TASK_LINKS_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}.get(args.select)
         if entry is None:
             raise ValueError(f"고정된 연결 후보가 없다: {args.select}")
+        if not info.main_tasks:  # 로컬 공고 입력이 없어도 고정본의 업무로 이름과 짝을 맞춘다
+            info.main_tasks = list(entry["tasks"])
+        info.task_labels = list(entry.get("labels") or [])  # 업무 이름은 공고 정보(main_tasks)에도 쓴다
         return build_links(profile, entry["tasks"], {"links": entry["links"]}, labels=entry.get("labels"))
     return link_tasks(profile, info.main_tasks, args.writer_client, allow_external_profile=True,
                       is_synthetic=selected.profile.is_synthetic, job_id=args.select)
