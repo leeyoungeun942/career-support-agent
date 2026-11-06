@@ -291,7 +291,7 @@
     {"requirement_id": "3-R3", "status": "met", "job_quote": "문서, 데이터, 콘텐츠를 구조화하여 기획안으로 정리해 본 경험",
      "profile_evidence": [
        {"experience_id": "exp-2", "quote": "사수 PM의 지시에 따라 사내 규정 문서(PDF) 텍스트 데이터 정제 작업 보조"},
-       {"experience_id": "exp-3", "quote": "사용자 입장에서 응답 대기 시간이 길어질 때의 이탈 지점 분석 및 보고서 작성"}
+       {"experience_id": "exp-3", "quote": "메뉴, 영업시간, 위치, 이벤트 등 분산된 카페 정보를 수집하고 목적별 정보 구조 및 페이지 구성 체계 설계"}
      ],
      "evidence_checked_by": "ai", "status_decided_by": "ai"},
     {"requirement_id": "3-R4", "status": "needs_check", "reason_code": "level_unclear", "job_quote": "자유자재로 업무에 활용",
@@ -613,12 +613,13 @@ write_application(writer_input, client, kind) -> ApplicationDraft   (agents/appl
 
 | 모델 | 칸 |
 |---|---|
-| `WriterInput` (`writer_input.v1`, **저장하지 않는다**) | `job`(`job_id`, `job_label`, `company_name`, `job_title`, `position`, `main_tasks`, `requirements`), `profile`(`profile_payload`와 같은 칸, 이름·연락처 없음), `usable_facts`(`F1`…), `to_confirm`(`C1`…), `do_not_claim`(`X1`…), `notices`(`SelectedJob`의 경고 문구 복사), `meta`(`run_id`, `job_id`, `profile_id`, `is_synthetic`) |
-| `ApplicationDraft` | `kind`(`cover_letter` / `portfolio`), `job_id`, `run_id`, `profile_id`, `is_synthetic`, `sections[]`(`section`, `text`, `fact_ids`), `to_confirm`(코드가 복사), `notices`(코드가 복사), `banner`, `meta`(`mode` mock/ai, `model`, `prompt_version`, 토큰) |
+| `WriterInput` (`writer_input.v1`, **저장하지 않는다**) | `job`(`job_id`, `job_label`, `company_name`, `job_title`, `position`, `main_tasks`, `requirements`), `profile`(`profile_payload`와 같은 칸, 이름·연락처 없음), `usable_facts`(`F1`…, 각 사실은 `text`, `evidence`, `computed`, 경험별 목록 `evidence_detail[]`(`experience_id`, `role`, `actions`, `tools`, `result`만)), `to_confirm`(`C1`…), `do_not_claim`(`X1`…), `notices`(`SelectedJob`의 경고 문구 복사), `meta`(`run_id`, `job_id`, `profile_id`, `is_synthetic`) |
+| `ApplicationDraft` | `kind`(`cover_letter` / `portfolio`), `job_id`, `run_id`, `profile_id`, `is_synthetic`, `sections[]`(`section`, `heading`, `paragraphs[]`(`text`, `fact_ids`), `bullets[]`(`text`, `fact_ids`)), `verification`(검증 한계 문구), `to_confirm`(코드가 복사), `notices`(코드가 복사), `banner`, `meta`(`mode` mock/ai, `model`, `prompt_version`, 토큰) |
 
 - 분류와 검증 규칙은 정책 2~3장이다. 확인 필요 목록과 경고 문구는 모델이 쓰지 않고 코드가 입력에서 복사한다.
 - `build_writer_input`은 프로필 인용을 담은 `SelectedJob`만 받는다. 실행 결과를 메모리에서 바로 고르면(`select_job(run, ..., include_profile_evidence=True)`) 인용이 있고, 인용을 뺀 저장 파일에서는 만들 수 없다.
-- 초안 파일은 `--draft ... --save-draft`일 때만 `data/results/drafts/<run_id>-<job_id>-<kind>.json`에 쓴다(가상 프로필 한정, 커밋하지 않음). `WriterInput`은 어떤 경우에도 쓰지 않는다.
+- 초안 파일은 `--draft ... --save-draft`일 때만 `data/results/drafts/<run_id>-<job_id>-<kind>.json`에 쓴다(가상 프로필 한정, 커밋하지 않음). `WriterInput`은 어떤 경우에도 쓰지 않는다. **`evidence_detail`은 프로필 원문이므로 저장·캐시·로그·오류 메시지에 넣지 않는다**(`WriterInput`과 같은 저장 금지 대상).
+- #21(2026-11-06)에서 `ApplicationDraft.sections`의 모양이 바뀌었다(`text` 단독 → `heading` + 문단 + 불릿). 저장된 초안을 읽는 코드가 없고 초안은 기본으로 저장하지 않으므로 이전 변환기는 만들지 않는다.
 
 ---
 

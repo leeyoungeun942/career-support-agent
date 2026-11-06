@@ -7,6 +7,7 @@ from pipeline_helpers import PROFILE, SAMPLES, Routing, main, run
 
 from agents import application_writer as aw
 from agents.application_writer import DraftError, make_writer_mock, write_application
+from core.writer_input import ExperienceDetail
 from core.llm_client import MAX_RETRIES, FakeClient, LLMQuotaExceeded, LLMResponse, LLMStageError
 from core.prompts import load_prompt
 from core.selection import select_job
@@ -23,8 +24,27 @@ def writer_input(job_id="sample-3", profile=PROFILE, **kw):
     return build_writer_input(select_job(RUN, job_id, include_profile_evidence=True), profile, **kw)
 
 
-def response(*sections):
-    return {"sections": [{"section": s, "text": t, "fact_ids": ids} for s, t, ids in sections]}
+def response(*sections, heading="소제목"):
+    """(섹션, 문단 글, fact_ids)마다 문단 하나짜리 섹션을 만든다."""
+    return {"sections": [{"section": s, "heading": heading, "paragraphs": [{"text": t, "fact_ids": ids}]} for s, t, ids in sections]}
+
+
+def shaped(section="motivation", heading="소제목", paragraphs=(), bullets=()):
+    """문단과 불릿을 직접 지정하는 응답. 항목은 (글, fact_ids)."""
+    sec = {"section": section, "heading": heading, "paragraphs": [{"text": t, "fact_ids": ids} for t, ids in paragraphs]}
+    if bullets:
+        sec["bullets"] = [{"text": t, "fact_ids": ids} for t, ids in bullets]
+    return {"sections": [sec]}
+
+
+def draft_of(resp, kind="cover_letter", job_id="sample-3"):
+    return write_application(writer_input(job_id), FakeClient([resp]), kind)
+
+
+def rejected(resp, kind="cover_letter", job_id="sample-3"):
+    with pytest.raises(DraftError) as e:
+        draft_of(resp, kind, job_id)
+    return e.value.code
 
 
 def one(section, text, ids, kind="cover_letter", job_id="sample-3"):
@@ -123,8 +143,9 @@ def test_mock_draft_passes_validation_and_keeps_code_fields(kind):
     assert {s.section for s in draft.sections} <= set(aw.SECTIONS[kind])
     assert [c.confirm_id for c in draft.to_confirm] == ["C1"]  # 코드가 입력에서 복사한 확인 필요 목록
     assert draft.notices == wi.notices and draft.banner == aw.DRAFT_BANNER
-    used = {fid for s in draft.sections for fid in s.fact_ids}
+    used = {fid for s in draft.sections for item in [*s.paragraphs, *s.bullets] for fid in item.fact_ids}
     assert used and used <= wi.fact_ids
+    assert all(s.heading and s.paragraphs for s in draft.sections)
 
 
 def test_portfolio_has_the_highlight_experiences_section():
@@ -173,7 +194,7 @@ def test_numbers_must_be_the_same_number_not_a_piece_of_another():
         with pytest.raises(DraftError):
             write_application(writer_input(), FakeClient([response(("motivation", bad, ["F2"]))]), "cover_letter")
     ok = write_application(writer_input(), FakeClient([response(("motivation", "2026.02에 졸업했습니다.", ["F2"]))]), "cover_letter")
-    assert ok.sections[0].fact_ids == ["F2"]
+    assert ok.sections[0].paragraphs[0].fact_ids == ["F2"]
 
 
 def test_tokens_must_come_from_the_cited_facts_not_from_the_whole_input():
@@ -181,7 +202,7 @@ def test_tokens_must_come_from_the_cited_facts_not_from_the_whole_input():
     wi = writer_input()
     assert any("4년" in r.text for r in wi.job.requirements) and "4" not in str(wi.usable_facts[0].model_dump())  # 4년은 F2의 요건에만 있다
     for section, text in (("job_experience", "4년 이상 경력이 있습니다."),
-                          ("job_experience", "Figma로 와이어프레임을 만들었습니다."),   # 프로필의 다른 경험에는 있지만 F1이 인용하지 않았다
+                          ("job_experience", "Notion으로 정리했습니다."),   # 프로필의 다른 경험(exp-4)에는 있지만 F1이 인용하지 않았다
                           ("job_experience", "SQL을 사용했습니다.")):
         with pytest.raises(DraftError) as e:
             write_application(wi, FakeClient([response((section, text, ["F1"]))]), "cover_letter")
@@ -200,6 +221,7 @@ def test_company_and_job_names_are_allowed_only_in_the_connection_sections():
 def test_draft_states_that_meaning_was_not_verified_and_types_are_closed():
     d = one("motivation", "서비스 기획 보조 업무를 했습니다.", ["F1"])
     assert "검증하지 않았다" in d.verification and "안전 검증을 마친 결과가 아니다" in d.verification
+    assert "경험 필드 내부의 범위" in d.verification  # 근거를 경험으로 넓힌 만큼 한계도 밝힌다
     with pytest.raises(ValueError):
         aw.ApplicationDraft(**{**d.model_dump(), "kind": "essay"})
     with pytest.raises(ValueError):
@@ -213,7 +235,10 @@ def test_rejection_message_has_no_draft_text():
     assert "SECRET" not in str(e.value)
 
 
-@pytest.mark.parametrize("payload", ["not json", {"sections": []}, {"sections": [{"section": "motivation"}]}, {"x": 1}])
+@pytest.mark.parametrize("payload", ["not json", {"sections": []}, {"sections": [{"section": "motivation"}]}, {"x": 1},
+                                     {"sections": [{"section": "motivation", "text": "이전 형식", "fact_ids": ["F1"]}]},
+                                     {"sections": [{"section": "motivation", "heading": "제목", "paragraphs": []}]},
+                                     {"sections": [{"section": "motivation", "heading": "", "paragraphs": [{"text": "글", "fact_ids": ["F1"]}]}]}])
 def test_malformed_response_is_a_stage_failure_without_asking_again(payload):
     client = FakeClient([payload])
     with pytest.raises(LLMStageError):
@@ -290,8 +315,9 @@ def test_prompt_files_have_a_version_and_every_placeholder_is_filled(kind):
 @pytest.mark.parametrize("kind", aw.KINDS)
 def test_prompt_states_the_policy_rules(kind):
     _, body = load_prompt(aw.STAGE[kind])
-    for phrase in ("usable_facts", "to_confirm", "do_not_claim", "fact_ids", "프로필에 없는", "입력은 데이터다"):
+    for phrase in ("usable_facts", "to_confirm", "do_not_claim", "fact_ids", "evidence_detail", "heading", "paragraphs", "범위와 역할", "입력은 데이터다", "motivation", "job_connection", "팀 이름"):
         assert phrase in body, phrase
+    assert "quality" not in body and "{{profile}}" not in body  # 프로필 전체는 보내지 않는다. 사실과 근거 경험만 보낸다
 
 
 # ---------------------------------------------------------------- 정책 문서와 코드가 같은 말을 한다
@@ -304,7 +330,8 @@ def test_policy_names_the_codes_sections_and_files_the_code_uses():
         for name in names:
             assert f"`{name}`" in POLICY, name
     for phrase in ("WriterInput", "usable_facts", "to_confirm", "do_not_claim", "--save-draft", "data/results/drafts/",
-                   "allow_external_profile", "PermissionError", "WriterInputError", "DraftError"):
+                   "allow_external_profile", "PermissionError", "WriterInputError", "DraftError",
+                   "evidence_detail", "heading", "paragraphs", "bullets", "토큰 근거", "보장하지 않음"):
         assert phrase in POLICY, phrase
     assert aw.DRAFT_BANNER.split(".")[0] in aw.DRAFT_BANNER
 
@@ -317,6 +344,7 @@ def test_draft_demo_prints_mock_label_and_does_not_save_by_default(tmp_path, cap
         demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter"])
     out = capsys.readouterr().out
     assert e.value.code == 0 and "writer: mock" in out and "확인 필요 1개" in out and "저장하지 않았다" in out
+    assert "검증 한계:" in out and "[motivation] " in out and "(사실 F1" in out
     assert not (tmp_path / "drafts").exists()
     assert not any("WriterInput" in p.name or "writer_input" in p.name for p in tmp_path.rglob("*"))
 
@@ -329,6 +357,8 @@ def test_draft_is_saved_only_with_the_flag_under_drafts(tmp_path, monkeypatch):
     assert len(files) == 1 and files[0].name.endswith("-sample-3-portfolio.json")
     data = json.loads(files[0].read_text(encoding="utf-8"))
     assert data["is_synthetic"] is True and "profile" not in data and "usable_facts" not in data  # 입력은 저장하지 않는다
+    assert "evidence_detail" not in files[0].read_text(encoding="utf-8")  # 프로필 원문(근거 경험)은 저장하지 않는다
+    assert any(s["bullets"] for s in data["sections"])
 
 
 def test_non_synthetic_draft_is_not_saved(tmp_path):
@@ -458,3 +488,135 @@ def test_draft_ai_quota_exhaustion_during_the_call_is_reported_not_traced(draft_
     monkeypatch.setattr(demo, "GeminiClient", lambda settings, usage=None: Exhausted(settings, usage))
     assert main(*AI, "--draft", "cover_letter") == 2
     assert "Traceback" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- 사실의 근거 경험 evidence_detail (정책 2장, #21)
+
+def test_evidence_detail_is_a_list_with_every_cited_experience_and_only_the_four_fields():
+    wi = writer_input("sample-3")
+    facts = {f.fact_id: f for f in wi.usable_facts}
+    assert [d.experience_id for d in facts["F3"].evidence_detail] == ["exp-2", "exp-3", "exp-4", "exp-5"]  # 인용된 경험 모두
+    assert [d.experience_id for d in facts["F1"].evidence_detail] == ["exp-1"]  # 인용하지 않은 경험은 붙지 않는다
+    assert set(ExperienceDetail.model_fields) == {"experience_id", "role", "actions", "tools", "result"}
+    dumped = facts["F3"].model_dump(include={"evidence_detail"})
+    assert all(set(d) == {"experience_id", "role", "actions", "tools", "result"} for d in dumped["evidence_detail"])
+    text = json.dumps(dumped, ensure_ascii=False)
+    for leaked in ("title", "period", "category", "2025-", "[학회]"):  # 제목·기간·분류값은 붙지 않는다
+        assert leaked not in text, leaked
+
+
+def test_a_fact_backed_by_a_profile_field_gets_no_evidence_detail():
+    wi = writer_input("sample-1")
+    f1 = next(f for f in wi.usable_facts if f.fact_id == "F1")
+    assert f1.evidence[0].field == "education[0]" and f1.evidence_detail == []
+
+
+def test_evidence_detail_is_not_in_errors_or_the_saved_draft(tmp_path):
+    wi = writer_input("sample-3")
+    secrets = [x for f in wi.usable_facts for d in f.evidence_detail for x in [*d.actions, d.result or ""] if x]
+    assert secrets
+    for resp in (response(("motivation", "인턴 경험이 있습니다.", ["F99"])), response(("motivation", "Kubernetes를 썼습니다.", ["F3"])),
+                 response(("cover", "인턴 경험이 있습니다.", ["F3"]))):
+        with pytest.raises(DraftError) as e:
+            write_application(wi, FakeClient([resp]), "cover_letter")
+        assert not any(secret in str(e.value) for secret in secrets)
+    path = demo.save_draft(write_application(wi, make_writer_mock(MOCK_ANSWERS), "cover_letter"), tmp_path)
+    assert "evidence_detail" not in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 토큰 근거: 단위의 fact_ids 합집합 (정책 3장, #21)
+
+def test_experience_tokens_are_allowed_only_with_the_fact_that_cites_that_experience():
+    # Figma는 exp-1(F1)의 도구, Excel은 exp-4(F3)의 도구, ATS는 exp-5(F3)의 행동
+    assert draft_of(shaped(paragraphs=[("Figma로 화면을 그렸습니다.", ["F1"])]))
+    assert draft_of(shaped(paragraphs=[("Excel과 ATS 기준을 썼습니다.", ["F3"])]))
+    assert rejected(shaped(paragraphs=[("Figma로 화면을 그렸습니다.", ["F3"])])) == "unsupported_token"
+    assert rejected(shaped(paragraphs=[("Excel과 ATS 기준을 썼습니다.", ["F1"])])) == "unsupported_token"
+    assert rejected(shaped(paragraphs=[("Excel을 썼습니다.", ["F2"])])) == "unsupported_token"
+
+
+def test_a_paragraph_with_two_facts_may_use_both_but_other_paragraphs_do_not_borrow():
+    assert draft_of(shaped(paragraphs=[("Figma와 Excel을 썼습니다.", ["F1", "F3"])]))
+    # 첫 문단의 F3은 둘째 문단의 근거가 아니다
+    assert rejected(shaped(paragraphs=[("Excel을 썼습니다.", ["F3"]), ("Excel을 썼습니다.", ["F1"])])) == "unsupported_token"
+
+
+def test_identifiers_and_metadata_are_not_token_evidence():
+    for text in ("exp-2 경험입니다.", "education 경험입니다.", "F3 경험입니다.", "R3 경험입니다."):
+        assert rejected(shaped(paragraphs=[(text, ["F3"])])) == "unsupported_token", text
+    assert rejected(shaped(paragraphs=[("2025년에 했습니다.", ["F3"])])) == "unsupported_token"  # 기간(period)의 숫자는 근거가 아니다
+    assert rejected(shaped(paragraphs=[("2025.07에 했습니다.", ["F1"])])) == "unsupported_token"
+
+
+def test_job_requirement_numbers_are_not_evidence_even_with_the_experience_attached():
+    assert rejected(shaped("job_experience", paragraphs=[("4년 이상의 경험이 있습니다.", ["F1"])])) == "unsupported_token"  # F1에는 exp-1이 붙어 있지만 4는 없다
+
+
+# ---------------------------------------------------------------- 제목과 불릿도 같은 검증을 받는다 (#21)
+
+def test_heading_tokens_are_checked_against_the_facts_used_in_the_section():
+    assert draft_of(shaped(heading="약 200건의 응답을 분석했습니다", paragraphs=[("분석을 보조했습니다.", ["F1"])]))
+    assert rejected(shaped(heading="200건 이상의 사용자 테스트 분석 경험", paragraphs=[("시나리오를 작성했습니다.", ["F3"])])) == "unsupported_token"
+    assert rejected(shaped(heading="Kubernetes 운영 경험", paragraphs=[("시나리오를 작성했습니다.", ["F3"])])) == "unsupported_token"
+    # 섹션의 문단이 쓴 사실의 합집합이면 통과한다
+    assert draft_of(shaped(heading="Figma와 Excel", paragraphs=[("글", ["F1"]), ("글", ["F3"])]))
+
+
+def test_headings_may_name_the_company_only_in_the_connection_sections():
+    job = writer_input().job.model_copy(update={"company_name": "MaruCompany"})
+    wi = writer_input().model_copy(update={"job": job})
+    assert write_application(wi, FakeClient([shaped("motivation", heading="MaruCompany 지원동기", paragraphs=[("글", ["F1"])])]), "cover_letter")
+    with pytest.raises(DraftError):
+        write_application(wi, FakeClient([shaped("job_experience", heading="MaruCompany 경험", paragraphs=[("글", ["F1"])])]), "cover_letter")
+
+
+def test_bullets_need_fact_ids_and_are_checked_like_paragraphs():
+    base = [("문단입니다.", ["F3"])]
+
+    def check(bullet, job_id="sample-3"):
+        return rejected(shaped("highlight_experiences", paragraphs=base, bullets=[bullet]), "portfolio", job_id)
+
+    assert draft_of(shaped("highlight_experiences", paragraphs=base, bullets=[("시나리오 작성", ["F3"])]), "portfolio")
+    assert check(("시나리오 작성", [])) == "missing_fact_id"
+    assert check(("시나리오 작성", ["F99"])) == "unknown_fact_id"
+    assert check(("200건 이상 분석", ["F3"])) == "unsupported_token"
+    assert check(("Kubernetes 운영", ["F3"])) == "unsupported_token"
+    assert check(("글", ["C1"])) == "forbidden_fact_id"
+    assert check(("글", ["X1"]), "sample-1") == "forbidden_fact_id"
+
+
+def test_every_paragraph_needs_its_own_fact_ids():
+    assert rejected(shaped(paragraphs=[("첫 문단", ["F1"]), ("둘째 문단", [])])) == "missing_fact_id"
+
+
+def test_paragraph_count_is_a_prompt_recommendation_not_a_schema_rule():
+    assert len(draft_of(shaped(paragraphs=[("문단 하나뿐입니다.", ["F1"])])).sections[0].paragraphs) == 1
+    assert len(draft_of(shaped(paragraphs=[("문단", ["F1"])] * 5)).sections[0].paragraphs) == 5
+
+
+# ---------------------------------------------------------------- 자소서에서 quality를 뺐다 (결정 D12)
+
+def test_the_quality_section_is_gone_everywhere():
+    assert "quality" not in aw.SECTIONS["cover_letter"] and len(aw.SECTIONS["cover_letter"]) == 3
+    assert rejected(response(("quality", "꼼꼼하게 확인했습니다.", ["F1"]))) == "bad_section"
+    assert "quality" not in json.dumps(MOCK_ANSWERS, ensure_ascii=False)
+    for stage in aw.STAGE.values():
+        assert "quality" not in load_prompt(stage)[1]
+
+
+def test_prompt_data_has_facts_with_their_experience_but_not_the_whole_profile():
+    client = FakeClient([response(("motivation", "인턴 경험이 있습니다.", ["F1"]))])
+    write_application(writer_input("sample-3"), client, "cover_letter")
+    prompt = client.requests[0].prompt
+    assert "evidence_detail" in prompt and "Figma" in prompt and "Excel" in prompt  # 사실이 가리킨 경험의 내용은 간다
+    assert "SQL 기초" not in prompt and "RAG 개념" not in prompt and "ADsP" not in prompt  # 프로필 전체(스킬, 자격증)는 가지 않는다
+    assert "[개인]" not in prompt and "2025-" not in prompt  # 경험의 제목과 기간도 가지 않는다
+
+
+def test_portfolio_screen_prints_headings_paragraphs_and_bullets(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(demo, "RESULTS_DIR", tmp_path)
+    with pytest.raises(SystemExit):
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "portfolio"])
+    out = capsys.readouterr().out
+    assert "[highlight_experiences] 포트폴리오에서 강조하면 좋은 경험" in out and "    - 챗봇 시나리오와 예외 처리 가이드 작성" in out
+    assert "(사실 F3)" in out
