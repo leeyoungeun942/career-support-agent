@@ -168,3 +168,19 @@ def test_screen_and_md_label_task_links_as_candidates_not_facts(tmp_path):
 def test_policy_names_the_new_codes_and_the_candidate_rules():
     for phrase in ("missing_evidence", "unknown_task_id", "task_only_claim", "task_links", "업무 연결 후보", "표면 검사", "--task-links", "task_links_sample3.json"):
         assert phrase in POLICY, phrase
+
+
+def test_link_rules_forbid_moving_task_wording_into_experience_sentences_only_when_links_exist():
+    with_links, without = FakeClient([para("글", task_ids=["T1"])]), FakeClient([para("글", fact_ids=["F1"])])
+    write_application(wi_for(), with_links, "cover_letter")
+    write_application(wi_for(links=False), without, "cover_letter")
+    system = with_links.requests[0].system
+    for phrase in ("공고의 요구이지 지원자의 경험이 아니다", "경험의 주체, 대상, 행동, 결과", "그대로 쓴다", "카페 사장님", "입사 후 포부 문장에서만"):
+        assert phrase in system, phrase
+    assert "공고의 요구이지" not in (without.requests[0].system or "")  # 연결 후보가 없으면 이 문장도 들어가지 않는다
+    assert with_links.requests[0].prompt_version == load_prompt(aw.STAGE["cover_letter"])[0] + "+links"
+
+
+def test_policy_documents_the_task_wording_rule_and_its_limit():
+    assert "D19" in POLICY and "공고의 요구이지 지원자의 경험이 아니다" in POLICY and "코드는 검증하지 못한다" in POLICY
+
