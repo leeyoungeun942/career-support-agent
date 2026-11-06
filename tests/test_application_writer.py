@@ -167,7 +167,7 @@ def test_warning_notices_stay_even_if_the_model_returns_its_own():
 @pytest.mark.parametrize("sections,code", [
     ([("motivation", "인턴 경험이 있습니다.", ["F99"])], "unknown_fact_id"),
     ([("motivation", "인턴 경험이 있습니다.", ["C1"])], "forbidden_fact_id"),
-    ([("motivation", "인턴 경험이 있습니다.", [])], "missing_fact_id"),
+    ([("motivation", "인턴 경험이 있습니다.", [])], "missing_evidence"),
     ([("cover", "인턴 경험이 있습니다.", ["F1"])], "bad_section"),
     ([("project_summary", "인턴 경험이 있습니다.", ["F1"])], "bad_section"),  # 포트폴리오 섹션은 자소서에 못 쓴다
     ([("motivation", "인턴 경험이 있습니다.", ["F1"]), ("motivation", "또 씁니다.", ["F1"])], "bad_section"),
@@ -324,7 +324,7 @@ def test_prompt_states_the_policy_rules(kind):
 
 @pytest.mark.policy_contract
 def test_policy_names_the_codes_sections_and_files_the_code_uses():
-    for code in ("bad_section", "missing_fact_id", "unknown_fact_id", "forbidden_fact_id", "unsupported_token", "no_evidence"):
+    for code in ("bad_section", "missing_evidence", "unknown_fact_id", "forbidden_fact_id", "unsupported_token", "no_evidence"):
         assert code in POLICY, code
     for names in aw.SECTIONS.values():
         for name in names:
@@ -344,7 +344,7 @@ def test_draft_demo_prints_mock_label_and_does_not_save_by_default(tmp_path, cap
         demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter"])
     out = capsys.readouterr().out
     assert e.value.code == 0 and "writer: mock" in out and "확인 필요 1개" in out and "저장하지 않았다" in out
-    assert "검증 한계:" in out and "[motivation] " in out and "(사실 F1" in out
+    assert "검증 한계:" in out and "[motivation] " in out and "(자격요건 근거 F1" in out
     assert not (tmp_path / "drafts").exists()
     assert not any("WriterInput" in p.name or "writer_input" in p.name for p in tmp_path.rglob("*"))
 
@@ -573,14 +573,14 @@ def test_headings_may_name_the_company_only_in_the_connection_sections():
         write_application(wi, FakeClient([shaped("job_experience", heading="MaruCompany 경험", paragraphs=[("글", ["F1"])])]), "cover_letter")
 
 
-def test_bullets_need_fact_ids_and_are_checked_like_paragraphs():
+def test_bullets_need_evidence_ids_and_are_checked_like_paragraphs():
     base = [("문단입니다.", ["F3"])]
 
     def check(bullet, job_id="sample-3"):
         return rejected(shaped("highlight_experiences", paragraphs=base, bullets=[bullet]), "portfolio", job_id)
 
     assert draft_of(shaped("highlight_experiences", paragraphs=base, bullets=[("시나리오 작성", ["F3"])]), "portfolio")
-    assert check(("시나리오 작성", [])) == "missing_fact_id"
+    assert check(("시나리오 작성", [])) == "missing_evidence"
     assert check(("시나리오 작성", ["F99"])) == "unknown_fact_id"
     assert check(("200건 이상 분석", ["F3"])) == "unsupported_token"
     assert check(("Kubernetes 운영", ["F3"])) == "unsupported_token"
@@ -588,8 +588,8 @@ def test_bullets_need_fact_ids_and_are_checked_like_paragraphs():
     assert check(("글", ["X1"]), "sample-1") == "forbidden_fact_id"
 
 
-def test_every_paragraph_needs_its_own_fact_ids():
-    assert rejected(shaped(paragraphs=[("첫 문단", ["F1"]), ("둘째 문단", [])])) == "missing_fact_id"
+def test_every_paragraph_needs_its_own_evidence_ids():
+    assert rejected(shaped(paragraphs=[("첫 문단", ["F1"]), ("둘째 문단", [])])) == "missing_evidence"
 
 
 def test_paragraph_count_is_a_prompt_recommendation_not_a_schema_rule():
@@ -622,7 +622,7 @@ def test_portfolio_screen_prints_headings_paragraphs_and_bullets(tmp_path, capsy
         demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "portfolio"])
     out = capsys.readouterr().out
     assert "[highlight_experiences] 포트폴리오에서 강조하면 좋은 경험" in out and "    - 챗봇 시나리오와 예외 처리 가이드 작성" in out
-    assert "(사실 F3)" in out
+    assert "(자격요건 근거 F3)" in out
 
 
 # ---------------------------------------------------------------- 실제 AI 초안은 확인용 md를 쓴다 (정책 5장 D13, #23)
@@ -639,7 +639,7 @@ def test_real_ai_draft_writes_a_review_md_without_the_save_flag(draft_ai, result
     for sec in draft.sections:  # 소제목, 문단 전체, 불릿, 근거 사실 id가 모두 있다
         assert f"## {sec.heading}" in md
         assert all(para.text in md for para in sec.paragraphs) and all(b.text in md for b in sec.bullets)
-    assert "근거 사실 F1" in md and "## 확인 필요 1개" in md and "C1 생성형 AI 도구를 자유자재로 활용" in md
+    assert "자격요건 근거 F1" in md and "## 확인 필요 1개" in md and "C1 생성형 AI 도구를 자유자재로 활용" in md
     assert "검증 한계:" in md and aw.DRAFT_BANNER in md
     assert "확인용 md:" in out and files[0].name in out
     for secret in ("evidence_detail", "SQL 기초", "ADsP", "010", "김하늘"):  # 프로필 전체·식별 정보는 들어가지 않는다

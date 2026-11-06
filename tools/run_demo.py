@@ -245,19 +245,32 @@ def save_draft(draft: ApplicationDraft, directory: Path) -> Path:
 KIND_LABEL = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}
 
 
+def _basis(item) -> str:
+    """문단·불릿의 근거 표기. 업무 연결 후보는 사실이 아니라서 따로 보인다 (정책 4장)."""
+    parts = []
+    if item.fact_ids:
+        parts.append("자격요건 근거 " + ", ".join(item.fact_ids))
+    if item.task_ids:
+        parts.append("업무 연결 후보 " + ", ".join(item.task_ids))
+    return "(" + ", ".join(parts) + ")"
+
+
 def draft_markdown(draft: ApplicationDraft) -> str:
     """사람이 전체를 읽는 확인용 md. 화면에 내는 초안과 같은 내용이다(소제목, 문단, 불릿, 근거 사실 id, 확인 필요, 경고, 검증 한계)."""
-    ids = lambda xs: f"*(근거 사실 {', '.join(xs)})*"  # noqa: E731
+    ids = lambda item: f"*{_basis(item)}*"  # noqa: E731
     lines = [f"# {KIND_LABEL[draft.kind]} 초안: 공고 {draft.job_id}", "",
              f"> writer: {draft.meta.mode} ({draft.meta.model}) · 프롬프트 v{draft.meta.prompt_version} · 실행 {draft.run_id} · 가상 프로필 {draft.profile_id}",
              f"> {draft.banner}", f"> 검증 한계: {draft.verification}", ""]
     for sec in draft.sections:
         lines += [f"## {sec.heading}", "", f"*섹션: {SECTIONS[draft.kind][sec.section]} (`{sec.section}`)*", ""]
         for para in sec.paragraphs:
-            lines += [para.text, "", ids(para.fact_ids), ""]
-        lines += [f"- {b.text} {ids(b.fact_ids)}" for b in sec.bullets]
+            lines += [para.text, "", ids(para), ""]
+        lines += [f"- {b.text} {ids(b)}" for b in sec.bullets]
         if sec.bullets:
             lines.append("")
+    if draft.linked_tasks:
+        lines += ["## 사용한 업무 연결 후보", "", "> 업무 연결 후보는 판정이 아니다. 프로필 경험을 이 업무와 연결해 설명할 수 있다는 후보일 뿐이며, 업무를 할 수 있다거나 요건을 충족한다는 근거가 아니다.", ""]
+        lines += [f"- {t.task_id} {t.text}" for t in draft.linked_tasks] + [""]
     lines += [f"## 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다)", ""]
     lines += [f"- {c.confirm_id} {c.text} → {c.question}" for c in draft.to_confirm]
     if draft.notices:
@@ -284,8 +297,9 @@ def render_draft(draft: ApplicationDraft, saved: Path | None, md: Path | None = 
              draft.banner, f"검증 한계: {draft.verification}"]
     for s in draft.sections:
         lines += [f"[{s.section}] {s.heading}"]
-        lines += [f"    {p.text} (사실 {', '.join(p.fact_ids)})" for p in s.paragraphs]
-        lines += [f"    - {b.text} (사실 {', '.join(b.fact_ids)})" for b in s.bullets]
+        lines += [f"    {p.text} {_basis(p)}" for p in s.paragraphs]
+        lines += [f"    - {b.text} {_basis(b)}" for b in s.bullets]
+    lines += [f"업무 연결 후보 {t.task_id}: {t.text}" for t in draft.linked_tasks]
     lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")
     lines += [f"{c.confirm_id} {c.text} -> {c.question}" for c in draft.to_confirm]
     lines += [f"경고: {n}" for n in draft.notices]
