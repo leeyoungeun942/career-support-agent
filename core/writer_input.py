@@ -44,6 +44,16 @@ class EvidenceRef(BaseModel):
     quote: str
 
 
+class ExperienceDetail(BaseModel):
+    """사실이 가리킨 경험의 내용. 칸은 role, actions, tools, result만이다(제목, 기간, 분류값은 붙이지 않는다, 정책 2장)."""
+
+    experience_id: str
+    role: str | None = None
+    actions: list[str] = []
+    tools: list[str] = []
+    result: str | None = None
+
+
 class UsableFact(BaseModel):
     fact_id: str
     requirement_id: str
@@ -51,6 +61,7 @@ class UsableFact(BaseModel):
     text: str
     evidence: list[EvidenceRef] = []
     computed: str | None = Field(default=None, description="숫자 요건에서 코드가 만든 비교식")
+    evidence_detail: list[ExperienceDetail] = Field(default=[], description="근거가 경험일 때 인용된 경험 모두의 지정 칸. 프로필 원문이라 저장하지 않는다")
 
 
 class ToConfirm(BaseModel):
@@ -114,6 +125,17 @@ def _refs(evidence: list[ProfileEvidence]) -> list[EvidenceRef]:
     return [EvidenceRef(experience_id=e.experience_id, field=e.field, quote=e.quote) for e in evidence]
 
 
+def _details(evidence: list[ProfileEvidence], profile: EligibilityProfile) -> list[ExperienceDetail]:
+    """인용된 경험마다 지정한 네 칸만 복사한다(경험 전체를 복사하지 않는다). 칸(field) 근거에는 붙이지 않는다."""
+    by_id = {x.id: x for x in profile.experiences}
+    out: dict[str, ExperienceDetail] = {}
+    for e in evidence:
+        if e.experience_id and e.experience_id in by_id and e.experience_id not in out:
+            x = by_id[e.experience_id]
+            out[e.experience_id] = ExperienceDetail(experience_id=x.id, role=x.role, actions=list(x.actions), tools=list(x.tools), result=x.result)
+    return list(out.values())
+
+
 def _bodies(req: JobRequirement, res: RequirementResult):
     """(item_index, 문장, 판정 칸)들. any_of는 항목별로, 아니면 요건 하나다."""
     if req.combine == "any_of":
@@ -151,7 +173,8 @@ def build_writer_input(selected: SelectedJob, profile: EligibilityProfile, info:
                                               text=text, reason=NO_EVIDENCE_REASON, question=body.question_for_user or DEFAULT_QUESTION))
                     continue
                 facts.append(UsableFact(fact_id=f"{FACT_PREFIX}{len(facts) + 1}", requirement_id=req.id, item_index=index, text=text,
-                                        evidence=evidence, computed=body.compared))
+                                        evidence=evidence, computed=body.compared,
+                                        evidence_detail=_details(body.profile_evidence, profile)))
             elif body.status == "needs_check":
                 confirms.append(ToConfirm(confirm_id=f"{CONFIRM_PREFIX}{len(confirms) + 1}", requirement_id=req.id, item_index=index,
                                           text=text, reason=body.reason_code or "scope_unclear",
