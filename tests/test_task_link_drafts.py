@@ -247,3 +247,15 @@ def test_labels_must_match_the_number_of_tasks():
 def test_policy_documents_the_task_labels():
     assert "D20" in POLICY and "`label`" in POLICY and "업무 이름" in POLICY
 
+
+def test_link_rules_forbid_ids_in_the_body_and_the_checker_catches_a_leak():
+    client = FakeClient([para("글", task_ids=["T1"])])
+    write_application(wi_labeled(), client, "cover_letter")
+    assert "내부 식별자" in client.requests[0].system and "업무 이름(`label`)으로 부른다" in client.requests[0].system
+    for leak in ("T1 업무에 이 경험을 연결합니다.", "F3 경험을 활용했습니다."):  # 7-5의 거부: 본문에 식별자를 쓰면 영문 토큰으로 걸린다
+        assert code_of(para(leak, fact_ids=["F3"], task_ids=["T1"])) == "unsupported_token", leak
+
+
+def test_policy_documents_the_id_rule():
+    assert "D21" in POLICY and "내부 식별자" in POLICY
+
