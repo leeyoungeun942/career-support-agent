@@ -527,11 +527,11 @@ def test_evidence_detail_is_not_in_errors_or_the_saved_draft(tmp_path):
 # ---------------------------------------------------------------- 토큰 근거: 단위의 fact_ids 합집합 (정책 3장, #21)
 
 def test_experience_tokens_are_allowed_only_with_the_fact_that_cites_that_experience():
-    # Figma는 exp-1(F1)의 도구, ChatGPT는 exp-3(F3)의 행동, Excel은 exp-4(F3)의 도구
+    # Figma는 exp-1(F1)의 도구, Excel은 exp-4(F3)의 도구, ATS는 exp-5(F3)의 행동
     assert draft_of(shaped(paragraphs=[("Figma로 화면을 그렸습니다.", ["F1"])]))
-    assert draft_of(shaped(paragraphs=[("ChatGPT와 Excel을 썼습니다.", ["F3"])]))
+    assert draft_of(shaped(paragraphs=[("Excel과 ATS 기준을 썼습니다.", ["F3"])]))
     assert rejected(shaped(paragraphs=[("Figma로 화면을 그렸습니다.", ["F3"])])) == "unsupported_token"
-    assert rejected(shaped(paragraphs=[("ChatGPT와 Excel을 썼습니다.", ["F1"])])) == "unsupported_token"
+    assert rejected(shaped(paragraphs=[("Excel과 ATS 기준을 썼습니다.", ["F1"])])) == "unsupported_token"
     assert rejected(shaped(paragraphs=[("Excel을 썼습니다.", ["F2"])])) == "unsupported_token"
 
 
@@ -610,7 +610,7 @@ def test_prompt_data_has_facts_with_their_experience_but_not_the_whole_profile()
     prompt = client.requests[0].prompt
     assert "evidence_detail" in prompt and "Figma" in prompt and "Excel" in prompt  # 사실이 가리킨 경험의 내용은 간다
     assert "SQL 기초" not in prompt and "RAG 개념" not in prompt and "ADsP" not in prompt  # 프로필 전체(스킬, 자격증)는 가지 않는다
-    assert "[개인/Side]" not in prompt and "2025-" not in prompt  # 경험의 제목과 기간도 가지 않는다
+    assert "[개인]" not in prompt and "2025-" not in prompt  # 경험의 제목과 기간도 가지 않는다
 
 
 def test_portfolio_screen_prints_headings_paragraphs_and_bullets(tmp_path, capsys, monkeypatch):
