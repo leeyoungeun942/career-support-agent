@@ -41,11 +41,14 @@ TASK_LINK_RULES = """
 - 업무 문장에 있는 회사·팀 이름은 `motivation`과 `job_connection` 밖에서는 쓰지 않는다.
 - **업무 문장은 공고의 요구이지 지원자의 경험이 아니다.** 업무 문장에 있는 어휘(예: "실무팀", "서비스 설계에 재반영", "우선순위 조율")를 경험을 서술하는 문장에 옮겨 쓰지 않는다. 경험의 주체, 대상, 행동, 결과는 `evidence`와 `evidence_detail`에 적힌 표현 그대로 쓴다(인용문에 "카페 사장님"이 있으면 "실무진"으로 바꾸지 않고, "분석"과 "작성 보조"를 "반영"이나 "설계"로 바꾸지 않는다). 업무 문장의 어휘는 입사 후 포부 문장에서만 쓴다.
 """
+TASK_LINK_LABEL_RULE = """- 후보의 `label`은 공고가 업무에 붙인 이름이다. 이 이름도 공고의 요구이지 지원자의 경험이 아니므로 경험을 서술하는 문장에는 쓰지 않고, 입사 후 포부 문장에서만 쓴다.
+"""
 DATA_MARKER = "\n## 입력 데이터\n"
 DRAFT_BANNER = "초안입니다. 제출 전에 사실을 직접 확인하세요."
 # task_ids만 있는 문단이 자격요건 충족·역량 보유·요건 수준을 주장할 때 쓰는 명시적 표현 (정책 3장). 표면 검사라 바꿔 쓴 표현은 못 잡는다
 TASK_ONLY_CLAIMS = ("충족", "갖추", "수행할 수 있", "해낼 수 있", "능숙", "숙달", "전문가")
 TASK_LINK_VERSION_SUFFIX = "+links"
+TASK_LINK_LABEL_VERSION_SUFFIX = "+labels"  # 업무 문장 대신 업무 이름을 준 경우
 VERIFICATION_NOTE = ("코드는 사실 id, 숫자, 영문 이름이 근거에 있는지만 대조했다. 문장의 의미(과장, 새 성과, 프로필에 없는 태도 표현)는 검증하지 않았다. "
                      "경험 필드 내부의 범위(약, 이상)·역할·성과 의미도 검증하지 않았다. 안전 검증을 마친 결과가 아니다.")
 
@@ -204,7 +207,8 @@ def _split(body: str) -> tuple[str, str]:
 
 def _data(wi: WriterInput) -> dict[str, str]:
     j = lambda obj: json.dumps(obj, ensure_ascii=False, indent=1)  # noqa: E731
-    links = j([t.model_dump() for t in wi.task_links])
+    # 업무 이름(label)이 있으면 프롬프트에는 업무 문장(text)을 빼고 이름만 준다 (정책 2장 D20)
+    links = j([t.model_dump(exclude={"text"}) if t.label else t.model_dump(exclude={"label"}) for t in wi.task_links])
     return {
         "job": j(wi.job.model_dump(exclude={"job_label"})),
         "usable_facts": j([f.model_dump(exclude_none=True) for f in wi.usable_facts]),
@@ -234,7 +238,10 @@ def write_application(wi: WriterInput, client: LLMClient, kind: str, allow_exter
     system_frame, data_frame = _split(body)
     sections_text = json.dumps(SECTIONS[kind], ensure_ascii=False, indent=1)
     link_rules = TASK_LINK_RULES if wi.task_links else ""  # 연결 후보가 없으면 프롬프트에 연결 후보 문장이 하나도 없다(기준선과 같은 내용)
-    version = version + TASK_LINK_VERSION_SUFFIX if wi.task_links else version
+    if wi.task_links:
+        labeled = all(t.label for t in wi.task_links)
+        version += TASK_LINK_LABEL_VERSION_SUFFIX if labeled else TASK_LINK_VERSION_SUFFIX
+        link_rules += TASK_LINK_LABEL_RULE if labeled else ""
     request = LLMRequest(stage=STAGE[kind], prompt=fill(data_frame, **_data(wi)),
                          system=fill(system_frame, sections=sections_text, task_link_rules=link_rules),
                          schema=DraftResponse, job_id=wi.meta.job_id, prompt_version=version, contains_profile=True)

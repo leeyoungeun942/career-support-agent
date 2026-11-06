@@ -184,3 +184,54 @@ def test_link_rules_forbid_moving_task_wording_into_experience_sentences_only_wh
 def test_policy_documents_the_task_wording_rule_and_its_limit():
     assert "D19" in POLICY and "공고의 요구이지 지원자의 경험이 아니다" in POLICY and "코드는 검증하지 못한다" in POLICY
 
+
+LABELS = FIXTURE["labels"]
+LABELED = build_links(PROFILE, TASKS, {"links": FIXTURE["links"]}, labels=LABELS)
+
+
+def wi_labeled():
+    sel = select_job(RUN, "sample-3", include_profile_evidence=True)
+    return build_writer_input(sel, PROFILE, JobInfo(main_tasks=list(TASKS)), task_links=LABELED)
+
+
+def test_the_fixture_has_one_label_per_task_and_links_carry_them():
+    assert len(LABELS) == len(TASKS) == 5 and [t.label for t in LABELED] == LABELS
+
+
+def test_with_labels_the_prompt_gets_the_label_but_not_the_task_sentence():
+    client = FakeClient([para("글", task_ids=["T1"])])
+    write_application(wi_labeled(), client, "cover_letter")
+    req = client.requests[0]
+    for label in LABELS:
+        assert label in req.prompt
+    for sentence in TASKS:  # 업무 문장은 프롬프트의 연결 후보에 없다
+        assert sentence not in req.prompt.split("업무 연결 후보 (task_links")[1]
+    assert req.prompt_version == load_prompt(aw.STAGE["cover_letter"])[0] + "+labels"
+    assert "공고가 업무에 붙인 이름" in req.system and "입사 후 포부 문장에서만" in req.system
+
+
+def test_without_labels_nothing_changes_from_the_task_sentence_version():
+    client = FakeClient([para("글", task_ids=["T1"])])
+    write_application(wi_for(), client, "cover_letter")
+    req = client.requests[0]
+    assert TASKS[0] in req.prompt and "label" not in req.prompt and req.prompt_version.endswith("+links")
+    assert "공고가 업무에 붙인 이름" not in req.system
+
+
+def test_labels_do_not_change_what_the_checker_accepts():
+    wi = wi_labeled()
+    ok = write_application(wi, FakeClient([para("정보 구조를 설계한 경험입니다.", task_ids=["T1"])]), "cover_letter")
+    assert ok.linked_tasks[0].text == TASKS[0]  # 화면·md에는 업무 문장이 그대로 나온다
+    with pytest.raises(DraftError) as e:
+        write_application(wi, FakeClient([para("Figma로 화면을 그렸습니다.", task_ids=["T1"])]), "cover_letter")
+    assert e.value.code == "unsupported_token"
+
+
+def test_labels_must_match_the_number_of_tasks():
+    with pytest.raises(ValueError):
+        build_links(PROFILE, TASKS, {"links": FIXTURE["links"]}, labels=LABELS[:3])
+
+
+def test_policy_documents_the_task_labels():
+    assert "D20" in POLICY and "`label`" in POLICY and "업무 이름" in POLICY
+

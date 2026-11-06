@@ -74,6 +74,7 @@ class TaskLink(BaseModel):
 
     task_id: str
     text: str
+    label: str | None = None  # 공고가 업무에 붙인 짧은 이름. 있으면 프롬프트에는 text 대신 label을 준다 (정책 2장 D20)
     evidence: list[EvidenceRef]
     evidence_detail: list[ExperienceDetail] = []
 

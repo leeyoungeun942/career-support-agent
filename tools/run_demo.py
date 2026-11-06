@@ -319,7 +319,7 @@ def _task_links(args, profile, selected, info):
         entry = {k: v for k, v in json.loads(TASK_LINKS_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}.get(args.select)
         if entry is None:
             raise ValueError(f"고정된 연결 후보가 없다: {args.select}")
-        return build_links(profile, entry["tasks"], {"links": entry["links"]})
+        return build_links(profile, entry["tasks"], {"links": entry["links"]}, labels=entry.get("labels"))
     return link_tasks(profile, info.main_tasks, args.writer_client, allow_external_profile=True,
                       is_synthetic=selected.profile.is_synthetic, job_id=args.select)
 

@@ -35,12 +35,14 @@ class LinkResponse(BaseModel):
     links: list[LinkOut]
 
 
-def build_links(profile: EligibilityProfile, tasks: list[str], raw: dict) -> list[TaskLink]:
+def build_links(profile: EligibilityProfile, tasks: list[str], raw: dict, labels: list[str] | None = None) -> list[TaskLink]:
     """모델 응답(또는 사람이 확정한 fixture)을 연결 후보로 바꾼다. 인용은 프로필 원문과 다시 대조하고 어긋나면 그 인용을 버린다.
 
     task_id는 업무 항목의 순서(T1…)를 그대로 쓴다. 인용이 하나도 남지 않은 업무는 후보를 만들지 않는다.
     없는 업무 번호나 같은 번호가 둘인 응답은 LLMStageError다.
     """
+    if labels is not None and len(labels) != len(tasks):
+        raise ValueError("업무 이름(labels)의 개수가 업무와 다르다")
     seen: set[int] = set()
     links: list[TaskLink] = []
     for item in raw["links"]:
@@ -56,7 +58,7 @@ def build_links(profile: EligibilityProfile, tasks: list[str], raw: dict) -> lis
             if evidence_problem(profile, ev) is None:
                 good.append(ev)
         if good:
-            links.append(TaskLink(task_id=f"{TASK_PREFIX}{index}", text=tasks[index - 1],
+            links.append(TaskLink(task_id=f"{TASK_PREFIX}{index}", text=tasks[index - 1], label=labels[index - 1] if labels else None,
                                   evidence=[EvidenceRef(experience_id=e.experience_id, quote=e.quote) for e in good],
                                   evidence_detail=experience_details(good, profile)))
     return sorted(links, key=lambda t: int(t.task_id[len(TASK_PREFIX):]))
