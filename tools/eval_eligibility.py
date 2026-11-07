@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-from core.llm_client import GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import assess_eligibility
 from core.rules import ProfileEvidenceError, rank_jobs
@@ -267,7 +267,7 @@ def run_mock(verbose=False):
 
 
 def prepare_ai(args, job_ids: list[str], results_dir: Path | None = None, *, needed_calls: int | None = None, notice: str | None = None) -> AiSession:
-    """--ai 실행의 공통 준비: 안내, 동의, 설정, 공고 원문 파일, 하루 호출 예산(공고당 요건 추출 1 + 근거 찾기 1)을 점검한다.
+    """--ai 실행의 공통 준비: 안내, 동의, 설정, 공고 원문 파일, 하루 호출 예산(공고당 요건 추출 1 + 근거 찾기 1, 각각 재시도를 포함한 최대 시도 수)을 점검한다.
 
     하나라도 안 되면 아무것도 보내지 않고 AiSetupError를 낸다. 이 도구와 tools.run_demo가 함께 쓴다. 공통 부분은 tools.ai_common에 있다.
     needed_calls와 notice를 주면 점검할 호출 수와 안내 문구를 바꾼다(게이트 AI를 함께 돌리는 run_demo --gate ai가 두 단계의 최대 시도 수를 합쳐 넘긴다).
@@ -285,7 +285,7 @@ def prepare_ai(args, job_ids: list[str], results_dir: Path | None = None, *, nee
             raise AiSetupError(f"공고 원문이 없는 표본: {missing}")
 
     session = prepare_session(
-        args, notice=notice or FREE_TIER_NOTICE, needed_calls=2 * len(job_ids) if needed_calls is None else needed_calls, results_dir=results_dir or RESULTS_DIR,
+        args, notice=notice or FREE_TIER_NOTICE, needed_calls=2 * len(job_ids) * (1 + MAX_RETRIES) if needed_calls is None else needed_calls, results_dir=results_dir or RESULTS_DIR,
         cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient, before_client=load_inputs,
     )
     session.postings = loaded

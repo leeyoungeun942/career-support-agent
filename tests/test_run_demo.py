@@ -174,7 +174,7 @@ def test_ai_run_changes_only_eligibility_and_records_run_info(ai_postings, resul
     monkeypatch.setattr(ev, "GeminiClient", Counting)
     assert main(*ai_args(ai_postings)) == 0
     out = capsys.readouterr().out
-    assert "자격요건: AI m-test" in out and "게이트: fixture 결과 사용" in out and Routing.needed == 12
+    assert "자격요건: AI m-test" in out and "게이트: fixture 결과 사용" in out and Routing.needed == 2 * 6 * 4
     run = demo.load_run(saved_runs(results)[0])
     info = run.run_info
     assert (info.eligibility_mode, info.model_id, info.cache_mode, info.gate_mode) == ("ai", "m-test", "memory", "injected")

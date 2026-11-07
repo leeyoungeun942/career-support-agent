@@ -160,7 +160,7 @@ def test_ai_run_with_routing_client_matches_policy_and_keeps_profile_off_disk(ai
         tool.main(ai_args(postings))
     out = capsys.readouterr().out
     assert e.value.code == 0 and "종합 판정 일치 6/6" in out and "m-test" in out
-    assert Routing.needed == 12  # 시작 전에 필요한 호출 수(공고 6 + 근거 6)를 점검한다
+    assert Routing.needed == 48  # 시작 전에 필요한 최대 시도 수(공고 6 x 2단계 x (1 + 재시도 3))를 점검한다
     assert not (tmp / "results" / "llm_cache" / "profile").exists()  # 프로필이 든 결과는 기본으로 디스크에 남지 않는다
     assert len(list((tmp / "results" / "llm_cache" / "extract").glob("*.json"))) == 6
 
