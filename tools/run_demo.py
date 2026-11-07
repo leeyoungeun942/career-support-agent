@@ -30,7 +30,8 @@ import sys
 from pathlib import Path
 
 from core.job_gate_mock import make_label_mock
-from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from agents.application_writer import KINDS, SECTIONS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from agents.task_linker import build_links, link_tasks
 from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import ScenarioJob, make_run_id, run_pipeline
@@ -44,6 +45,7 @@ from tools.ai_common import AiSetupError, prepare_session
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ev.RESULTS_DIR
 GATE_CASES_JSON = REPO / "data" / "sample-jobs" / "gate_sample_cases.json"
+TASK_LINKS_JSON = REPO / "tests" / "fixtures" / "task_links_sample3.json"  # 사람이 확정한 가상 프로필의 연결 후보 (합성 fixture, 정책 5장 D18)
 WRITER_MOCK_JSON = REPO / "tests" / "fixtures" / "writer_mock_sample3.json"
 PROFILE_REF = ProfileRef(profile_id="kim-haneul", is_synthetic=True)  # fixture의 가상 프로필 (김하늘)
 EXIT_REFUSED = 2
@@ -240,19 +242,100 @@ def save_draft(draft: ApplicationDraft, directory: Path) -> Path:
     return path
 
 
-def render_draft(draft: ApplicationDraft, saved: Path | None) -> list[str]:
+KIND_LABEL = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}
+
+
+def _basis(item) -> str:
+    """문단·불릿의 근거 표기. 업무 연결 후보는 사실이 아니라서 따로 보인다 (정책 4장)."""
+    parts = []
+    if item.fact_ids:
+        parts.append("자격요건 근거 " + ", ".join(item.fact_ids))
+    if item.task_ids:
+        parts.append("업무 연결 후보 " + ", ".join(item.task_ids))
+    return "(" + ", ".join(parts) + ")"
+
+
+def draft_markdown(draft: ApplicationDraft) -> str:
+    """사람이 전체를 읽는 확인용 md. 화면에 내는 초안과 같은 내용이다(소제목, 문단, 불릿, 근거 사실 id, 확인 필요, 경고, 검증 한계)."""
+    ids = lambda item: f"*{_basis(item)}*"  # noqa: E731
+    lines = [f"# {KIND_LABEL[draft.kind]} 초안: 공고 {draft.job_id}", "",
+             f"> writer: {draft.meta.mode} ({draft.meta.model}) · 프롬프트 v{draft.meta.prompt_version} · 실행 {draft.run_id} · 가상 프로필 {draft.profile_id}",
+             f"> {draft.banner}", f"> 검증 한계: {draft.verification}", ""]
+    for sec in draft.sections:
+        lines += [f"## {sec.heading}", "", f"*섹션: {SECTIONS[draft.kind][sec.section]} (`{sec.section}`)*", ""]
+        for para in sec.paragraphs:
+            lines += [para.text, "", ids(para), ""]
+        lines += [f"- {b.text} {ids(b)}" for b in sec.bullets]
+        if sec.bullets:
+            lines.append("")
+    if draft.linked_tasks:
+        lines += ["## 사용한 업무 연결 후보", "", "> 업무 연결 후보는 판정이 아니다. 프로필 경험을 이 업무와 연결해 설명할 수 있다는 후보일 뿐이며, 업무를 할 수 있다거나 요건을 충족한다는 근거가 아니다.", ""]
+        lines += [f"- {t.task_id} {t.text}" for t in draft.linked_tasks] + [""]
+    lines += [f"## 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다)", ""]
+    lines += [f"- {c.confirm_id} {c.text} → {c.question}" for c in draft.to_confirm]
+    if draft.notices:
+        lines += [""] + [f"**경고: {n}**" for n in draft.notices]
+    return "\n".join(lines) + "\n"
+
+
+def save_draft_md(draft: ApplicationDraft, directory: Path) -> Path:
+    """확인용 md를 directory/<run_id>-<job_id>-<kind>.md에 쓴다. 가상 프로필일 때만 쓰고, 같은 이름이 있으면 덮어쓰지 않는다 (정책 5장 D13)."""
+    if not draft.is_synthetic:
+        raise ValueError("초안은 가상 프로필일 때만 저장할 수 있다 (정책 5장)")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{draft.run_id}-{draft.job_id}-{draft.kind}.md"
+    with path.open("x", encoding="utf-8", newline="\n") as f:
+        f.write(draft_markdown(draft))
+    return path
+
+
+def render_draft(draft: ApplicationDraft, saved: Path | None, md: Path | None = None) -> list[str]:
     """초안을 화면에 낸다. 첫 줄에 mock / ai를 표시한다. 확인 필요 목록과 경고 문구는 코드가 붙인 것이다."""
-    kind = {"cover_letter": "자기소개서", "portfolio": "포트폴리오"}[draft.kind]
+    kind = KIND_LABEL[draft.kind]
     lines = [f"=== 초안: {kind} / writer: {draft.meta.mode} ({draft.meta.model}) / 공고 {draft.job_id} / 프롬프트 v{draft.meta.prompt_version} ===",
              draft.banner, f"검증 한계: {draft.verification}"]
     for s in draft.sections:
         lines += [f"[{s.section}] {s.heading}"]
-        lines += [f"    {p.text} (사실 {', '.join(p.fact_ids)})" for p in s.paragraphs]
-        lines += [f"    - {b.text} (사실 {', '.join(b.fact_ids)})" for b in s.bullets]
+        lines += [f"    {p.text} {_basis(p)}" for p in s.paragraphs]
+        lines += [f"    - {b.text} {_basis(b)}" for b in s.bullets]
+    lines += [f"업무 연결 후보 {t.task_id}: {t.text}" for t in draft.linked_tasks]
     lines.append(f"--- 확인 필요 {len(draft.to_confirm)}개 (초안에서 충족한 것처럼 쓰지 않았다) ---")
     lines += [f"{c.confirm_id} {c.text} -> {c.question}" for c in draft.to_confirm]
     lines += [f"경고: {n}" for n in draft.notices]
-    lines.append(f"저장: {saved.relative_to(REPO) if saved and saved.is_relative_to(REPO) else saved}" if saved else "저장하지 않았다 (--save-draft로 저장)")
+    rel = lambda path: path.relative_to(REPO) if path.is_relative_to(REPO) else path  # noqa: E731
+    lines.append(f"저장: {rel(saved)}" if saved else "저장하지 않았다 (--save-draft로 저장)")
+    if md:
+        lines.append(f"확인용 md: {rel(md)} (커밋하지 않는 파일)")
+    return lines
+
+
+def _task_links(args, profile, selected, info):
+    """--task-links에 따라 업무 연결 후보를 만든다. none은 없음, fixture는 사람이 확정한 합성 fixture, ai는 호출 1회 (결과는 저장하지 않는다)."""
+    mode = args.task_links
+    if mode == "none":
+        return []
+    if mode == "fixture":
+        entry = {k: v for k, v in json.loads(TASK_LINKS_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}.get(args.select)
+        if entry is None:
+            raise ValueError(f"고정된 연결 후보가 없다: {args.select}")
+        if not info.main_tasks:  # 로컬 공고 입력이 없어도 고정본의 업무로 이름과 짝을 맞춘다
+            info.main_tasks = list(entry["tasks"])
+        info.task_labels = list(entry.get("labels") or [])  # 업무 이름은 공고 정보(main_tasks)에도 쓴다
+        return build_links(profile, entry["tasks"], {"links": entry["links"]}, labels=entry.get("labels"))
+    return link_tasks(profile, info.main_tasks, args.writer_client, allow_external_profile=True,
+                      is_synthetic=selected.profile.is_synthetic, job_id=args.select)
+
+
+def render_links(links, tasks) -> list[str]:
+    """업무 연결 후보를 화면에 낸다(사람이 읽고 확정하는 용도). 저장하지 않는다."""
+    lines = [f"=== 업무 연결 후보 {len(links)}개 / 주요 업무 {len(tasks)}개 (사실이 아니고 판정이 아니다, 저장하지 않았다) ==="]
+    for t in links:
+        lines.append(f"{t.task_id} {t.text}")
+        lines += [f"    - [{e.experience_id}] {e.quote}" for e in t.evidence]
+    none = [f"T{i}" for i in range(1, len(tasks) + 1) if f"T{i}" not in {t.task_id for t in links}]
+    if none:
+        lines.append(f"후보가 없는 업무: {', '.join(none)}")
     return lines
 
 
@@ -260,7 +343,12 @@ def _draft(run: PipelineRun, profile, args) -> int:
     """고른 공고의 초안을 mock으로 만들어 보인다. 입력(WriterInput)은 메모리에만 있고 저장하지 않는다."""
     try:
         selected = select_job(run, args.select, include_profile_evidence=True)
-        wi = build_writer_input(selected, profile, _job_info(args.select, args.gate_cases))
+        info = _job_info(args.select, args.gate_cases)
+        links = _task_links(args, profile, selected, info)
+        if args.links_only:  # 연결 후보만 만들어 화면에 보이고 초안은 쓰지 않는다(사람이 읽고 확정하기 위해)
+            print("\n".join(render_links(links, info.main_tasks)))
+            return 0
+        wi = build_writer_input(selected, profile, info, task_links=links)
         client = getattr(args, "writer_client", None)
         if client is None:  # mock: fixture의 초안을 돌려준다
             answers = {k: v for k, v in json.loads(WRITER_MOCK_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}
@@ -270,10 +358,11 @@ def _draft(run: PipelineRun, profile, args) -> int:
             client = make_writer_mock(answers)
         draft = write_application(wi, client, args.draft, allow_external_profile=getattr(args, "writer_client", None) is not None, mode=getattr(args, "writer_mode", "mock"))
         path = save_draft(draft, RESULTS_DIR / "drafts") if args.save_draft else None
+        md = save_draft_md(draft, RESULTS_DIR / "drafts") if args.save_draft or draft.meta.mode == "ai" else None  # 실제 AI 초안은 플래그 없이도 (정책 5장 D13)
     except (SelectionRefused, WriterInputError, DraftError, LLMStageError, LLMQuotaExceeded, PermissionError, ValueError, FileExistsError) as e:
         print(f"초안을 만들지 못했다: {type(e).__name__}: {e}", file=sys.stderr)  # 메시지에는 초안·프로필 내용이 없다
         return EXIT_REFUSED
-    print("\n".join(render_draft(draft, path)))
+    print("\n".join(render_draft(draft, path, md)))
     return 0
 
 
@@ -348,7 +437,7 @@ def run_draft_ai(args) -> int:
     """
     try:
         build_scenario(args.gate, args.gate_cases)
-        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=1 + MAX_RETRIES, results_dir=RESULTS_DIR,
+        session = prepare_session(args, notice=ev.FREE_TIER_NOTICE, needed_calls=(1 + MAX_RETRIES) * (2 if args.task_links == "ai" and not args.links_only else 1), results_dir=RESULTS_DIR,
                                   cache_dir_name="extract", env_loader=load_env, client_cls=GeminiClient)
     except AiSetupError as e:
         print(e, file=sys.stderr)
@@ -374,6 +463,9 @@ def main(argv=None):
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
     p.add_argument("--select", metavar="JOB_ID", help="고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(초안 형식)로 저장한다")
     p.add_argument("--draft", choices=KINDS, help="고른 공고(--select)의 자소서 또는 포트폴리오 초안을 만든다 (mock만)")
+    p.add_argument("--task-links", choices=("none", "fixture", "ai"), default="none",
+                   help="초안에 주요 업무 연결 후보를 더한다. none=없음(기본), fixture=사람이 확정한 합성 fixture, ai=연결 후보 호출 1회(--ai일 때만, 결과는 저장하지 않는다)")
+    p.add_argument("--links-only", action="store_true", help="업무 연결 후보만 만들어 화면에 보인다(초안은 쓰지 않는다, --task-links fixture|ai와 함께)")
     p.add_argument("--save-draft", action="store_true", help="초안을 data/results/drafts/에 저장한다 (가상 프로필 한정)")
     p.add_argument("--save-profile-evidence", action="store_true", help="저장 파일에 프로필 원문 인용을 넣는다 (가상 프로필 한정)")
     p.add_argument("--cache-profile", action="store_true", help="근거 찾기 결과를 디스크에 캐시한다(가상 프로필 개발용)")
@@ -390,6 +482,12 @@ def main(argv=None):
         p.error("--draft는 --select와 함께 쓴다")
     if args.save_draft and not args.draft:
         p.error("--save-draft는 --draft와 함께 쓴다")
+    if args.task_links != "none" and not args.draft:
+        p.error("--task-links는 --draft와 함께 쓴다")
+    if args.links_only and args.task_links == "none":
+        p.error("--links-only는 --task-links fixture 또는 ai와 함께 쓴다")
+    if args.task_links == "ai" and not args.ai:
+        p.error("--task-links ai는 --ai와 함께 쓴다")
     if args.draft and args.real_profile:
         p.error("--real-profile은 구현하지 않았다")
     if args.draft and args.ai:

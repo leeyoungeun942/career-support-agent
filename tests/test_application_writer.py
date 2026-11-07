@@ -167,7 +167,7 @@ def test_warning_notices_stay_even_if_the_model_returns_its_own():
 @pytest.mark.parametrize("sections,code", [
     ([("motivation", "인턴 경험이 있습니다.", ["F99"])], "unknown_fact_id"),
     ([("motivation", "인턴 경험이 있습니다.", ["C1"])], "forbidden_fact_id"),
-    ([("motivation", "인턴 경험이 있습니다.", [])], "missing_fact_id"),
+    ([("motivation", "인턴 경험이 있습니다.", [])], "missing_evidence"),
     ([("cover", "인턴 경험이 있습니다.", ["F1"])], "bad_section"),
     ([("project_summary", "인턴 경험이 있습니다.", ["F1"])], "bad_section"),  # 포트폴리오 섹션은 자소서에 못 쓴다
     ([("motivation", "인턴 경험이 있습니다.", ["F1"]), ("motivation", "또 씁니다.", ["F1"])], "bad_section"),
@@ -324,7 +324,7 @@ def test_prompt_states_the_policy_rules(kind):
 
 @pytest.mark.policy_contract
 def test_policy_names_the_codes_sections_and_files_the_code_uses():
-    for code in ("bad_section", "missing_fact_id", "unknown_fact_id", "forbidden_fact_id", "unsupported_token", "no_evidence"):
+    for code in ("bad_section", "missing_evidence", "unknown_fact_id", "forbidden_fact_id", "unsupported_token", "no_evidence"):
         assert code in POLICY, code
     for names in aw.SECTIONS.values():
         for name in names:
@@ -344,7 +344,7 @@ def test_draft_demo_prints_mock_label_and_does_not_save_by_default(tmp_path, cap
         demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter"])
     out = capsys.readouterr().out
     assert e.value.code == 0 and "writer: mock" in out and "확인 필요 1개" in out and "저장하지 않았다" in out
-    assert "검증 한계:" in out and "[motivation] " in out and "(사실 F1" in out
+    assert "검증 한계:" in out and "[motivation] " in out and "(자격요건 근거 F1" in out
     assert not (tmp_path / "drafts").exists()
     assert not any("WriterInput" in p.name or "writer_input" in p.name for p in tmp_path.rglob("*"))
 
@@ -414,8 +414,11 @@ class DraftRouting(Routing):
 
     def _complete(self, request):
         self.requests.append(request)
-        assert request.stage.startswith("write_"), f"초안 작성이 아닌 단계를 보냈다: {request.stage}"
-        data = DraftRouting.answer_override or self.answers[(request.stage, request.job_id)]
+        assert request.stage.startswith("write_") or request.stage == "link_tasks", f"초안 작성이나 연결 후보가 아닌 단계를 보냈다: {request.stage}"
+        if request.stage == "link_tasks":
+            data = {"links": json.loads(demo.TASK_LINKS_JSON.read_text(encoding="utf-8"))["sample-3"]["links"]}
+        else:
+            data = DraftRouting.answer_override or self.answers[(request.stage, request.job_id)]
         self.usage.record(request, model=self.model, input_tokens=11, output_tokens=5)
         return LLMResponse(data=data, input_tokens=11, output_tokens=5)
 
@@ -570,14 +573,14 @@ def test_headings_may_name_the_company_only_in_the_connection_sections():
         write_application(wi, FakeClient([shaped("job_experience", heading="MaruCompany 경험", paragraphs=[("글", ["F1"])])]), "cover_letter")
 
 
-def test_bullets_need_fact_ids_and_are_checked_like_paragraphs():
+def test_bullets_need_evidence_ids_and_are_checked_like_paragraphs():
     base = [("문단입니다.", ["F3"])]
 
     def check(bullet, job_id="sample-3"):
         return rejected(shaped("highlight_experiences", paragraphs=base, bullets=[bullet]), "portfolio", job_id)
 
     assert draft_of(shaped("highlight_experiences", paragraphs=base, bullets=[("시나리오 작성", ["F3"])]), "portfolio")
-    assert check(("시나리오 작성", [])) == "missing_fact_id"
+    assert check(("시나리오 작성", [])) == "missing_evidence"
     assert check(("시나리오 작성", ["F99"])) == "unknown_fact_id"
     assert check(("200건 이상 분석", ["F3"])) == "unsupported_token"
     assert check(("Kubernetes 운영", ["F3"])) == "unsupported_token"
@@ -585,8 +588,8 @@ def test_bullets_need_fact_ids_and_are_checked_like_paragraphs():
     assert check(("글", ["X1"]), "sample-1") == "forbidden_fact_id"
 
 
-def test_every_paragraph_needs_its_own_fact_ids():
-    assert rejected(shaped(paragraphs=[("첫 문단", ["F1"]), ("둘째 문단", [])])) == "missing_fact_id"
+def test_every_paragraph_needs_its_own_evidence_ids():
+    assert rejected(shaped(paragraphs=[("첫 문단", ["F1"]), ("둘째 문단", [])])) == "missing_evidence"
 
 
 def test_paragraph_count_is_a_prompt_recommendation_not_a_schema_rule():
@@ -619,4 +622,121 @@ def test_portfolio_screen_prints_headings_paragraphs_and_bullets(tmp_path, capsy
         demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "portfolio"])
     out = capsys.readouterr().out
     assert "[highlight_experiences] 포트폴리오에서 강조하면 좋은 경험" in out and "    - 챗봇 시나리오와 예외 처리 가이드 작성" in out
-    assert "(사실 F3)" in out
+    assert "(자격요건 근거 F3)" in out
+
+
+# ---------------------------------------------------------------- 실제 AI 초안은 확인용 md를 쓴다 (정책 5장 D13, #23)
+
+@pytest.mark.parametrize("kind", aw.KINDS)
+def test_real_ai_draft_writes_a_review_md_without_the_save_flag(draft_ai, results, capsys, kind):
+    assert main(*AI, "--draft", kind) == 0
+    out = capsys.readouterr().out
+    files = list((results / "drafts").glob("*"))
+    assert [f.suffix for f in files] == [".md"] and files[0].name.endswith(f"-sample-3-{kind}.md")  # json은 --save-draft일 때만
+    md = files[0].read_text(encoding="utf-8")
+    draft = write_application(writer_input(), make_writer_mock(MOCK_ANSWERS), kind)
+    assert md.startswith("# " + demo.KIND_LABEL[kind] + " 초안") and "writer: ai (m-test)" in md
+    for sec in draft.sections:  # 소제목, 문단 전체, 불릿, 근거 사실 id가 모두 있다
+        assert f"## {sec.heading}" in md
+        assert all(para.text in md for para in sec.paragraphs) and all(b.text in md for b in sec.bullets)
+    assert "자격요건 근거 F1" in md and "## 확인 필요 1개" in md and "C1 생성형 AI 도구를 자유자재로 활용" in md
+    assert "검증 한계:" in md and aw.DRAFT_BANNER in md
+    assert "확인용 md:" in out and files[0].name in out
+    for secret in ("evidence_detail", "SQL 기초", "ADsP", "010", "김하늘"):  # 프로필 전체·식별 정보는 들어가지 않는다
+        assert secret not in md
+
+
+def test_real_ai_draft_md_is_not_written_when_the_draft_is_rejected(draft_ai, results, capsys):
+    DraftRouting.answer_override = response(("motivation", "인턴 경험이 있습니다.", ["X9"]))
+    assert main(*AI, "--draft", "cover_letter") == 2
+    assert not (results / "drafts").exists()
+
+
+def test_mock_draft_writes_md_only_with_the_save_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(demo, "RESULTS_DIR", tmp_path)
+    with pytest.raises(SystemExit):
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter"])
+    assert not (tmp_path / "drafts").exists()
+    with pytest.raises(SystemExit):
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter", "--save-draft"])
+    assert sorted(f.suffix for f in (tmp_path / "drafts").glob("*")) == [".json", ".md"]
+
+
+def test_review_md_is_not_written_for_a_real_profile_and_never_overwrites(tmp_path):
+    draft = write_application(writer_input(), make_writer_mock(MOCK_ANSWERS), "portfolio")
+    with pytest.raises(ValueError, match="가상 프로필"):
+        demo.save_draft_md(draft.model_copy(update={"is_synthetic": False}), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    path = demo.save_draft_md(draft, tmp_path)
+    assert "[highlight_experiences]" not in path.read_text(encoding="utf-8") and "(`highlight_experiences`)" in path.read_text(encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        demo.save_draft_md(draft, tmp_path)
+
+
+def test_policy_documents_the_review_md():
+    assert "확인용 md" in POLICY and "D13" in POLICY and "--save-draft" in POLICY
+
+
+# ---------------------------------------------------------------- --task-links ai: 연결 후보 호출 1회가 초안 호출 앞에 붙는다 (정책 5장 D18)
+
+def test_task_links_ai_adds_one_call_before_the_draft_and_counts_it_in_the_budget(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--draft", "cover_letter") == 0
+    client = draft_ai[0]
+    assert [r.stage for r in client.requests] == ["link_tasks", "write_cover_letter"]
+    assert all(r.contains_profile is True for r in client.requests)  # 둘 다 디스크 캐시에 안 남는다
+    assert Routing.needed == 2 * (1 + MAX_RETRIES)  # 예산 점검에 연결 후보 호출을 반영한다
+    assert not (results / "llm_cache" / "profile").exists()
+    assert "자격요건과 게이트는 mock" in capsys.readouterr().out
+
+
+def test_task_links_are_never_written_by_a_real_ai_run(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--draft", "cover_letter", "--save-draft") == 0
+    capsys.readouterr()
+    for path in results.rglob("*"):  # 연결 후보(프로필 원문)와 근거 경험은 어떤 파일에도 구조 그대로 남지 않는다
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            assert "task_links" not in text and "evidence_detail" not in text, path
+    usage = (results / "llm_usage.jsonl").read_text(encoding="utf-8")
+    assert "카페" not in usage and "quote" not in usage  # 사용량 기록에는 내용이 없다
+
+
+def test_task_links_none_is_the_default_and_sends_no_link_call(draft_ai, capsys):
+    assert main(*AI, "--draft", "cover_letter") == 0
+    assert [r.stage for r in draft_ai[0].requests] == ["write_cover_letter"]
+
+
+def test_links_only_makes_one_link_call_shows_the_links_and_writes_no_draft(draft_ai, results, capsys):
+    assert main(*AI, "--task-links", "ai", "--links-only", "--draft", "cover_letter") == 0
+    out = capsys.readouterr().out
+    assert [r.stage for r in draft_ai[0].requests] == ["link_tasks"]  # 초안 호출은 없다
+    assert Routing.needed == 1 + MAX_RETRIES  # 예산도 연결 후보 호출 하나분
+    assert "업무 연결 후보 5개 / 주요 업무 5개" in out and "저장하지 않았다" in out and "T1 " in out and "[exp-3]" in out
+    assert not (results / "drafts").exists()  # 초안도 md도 쓰지 않는다
+
+
+def test_links_only_needs_a_task_links_mode_and_prints_tasks_without_candidates():
+    with pytest.raises(SystemExit) as e:
+        demo.main(["--gate", "injected", "--select", "sample-3", "--draft", "cover_letter", "--links-only"])
+    assert e.value.code == 2
+    lines = demo.render_links([], ["업무 하나", "업무 둘"])
+    assert lines[0].startswith("=== 업무 연결 후보 0개 / 주요 업무 2개") and lines[-1] == "후보가 없는 업무: T1, T2"
+
+
+def test_fixture_mode_through_the_cli_sends_task_names_and_no_task_sentence(draft_ai, capsys):
+    fx = json.loads(demo.TASK_LINKS_JSON.read_text(encoding="utf-8"))["sample-3"]
+    assert main(*AI, "--task-links", "fixture", "--draft", "cover_letter") == 0
+    capsys.readouterr()
+    req = draft_ai[0].requests[0]
+    everything = req.prompt + (req.system or "")
+    assert all(sentence not in everything for sentence in fx["tasks"])  # 공고 정보에도 연결 후보에도 업무 문장이 없다
+    assert all(label in req.prompt for label in fx["labels"]) and req.prompt_version.endswith("+names")
+
+
+def test_fixture_mode_works_without_the_local_gate_file(draft_ai, monkeypatch, capsys):
+    """로컬 공고 입력(git 제외)이 없어도 고정본의 업무로 이름과 짝을 맞춘다."""
+    from core.writer_input import JobInfo
+    monkeypatch.setattr(demo, "_job_info", lambda job_id, path=None: JobInfo(company_name="회사", job_title="직무"))
+    assert main(*AI, "--task-links", "fixture", "--draft", "cover_letter") == 0
+    capsys.readouterr()
+    assert draft_ai[0].requests[0].prompt_version.endswith("+names")
+
