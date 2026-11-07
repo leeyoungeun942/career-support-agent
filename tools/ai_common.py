@@ -71,3 +71,15 @@ def prepare_session(
     client = CachedClient(gemini, usage=usage, extract_dir=cache_dir, profile_dir=results_dir / "llm_cache" / "profile",
                           cache_profile=getattr(args, "cache_profile", False))
     return AiSession(settings, usage, gemini, client, usage.calls_today(settings.model))
+
+
+def extra_cached_client(session: AiSession, args, *, results_dir: Path, cache_dir_name: str) -> CachedClient:
+    """같은 GeminiClient·사용량 기록을 감싼 캐시 클라이언트를 하나 더 만든다. 다른 캐시 디렉터리를 쓰려는 단계(게이트 `gate`)용이다.
+
+    한도와 사용량은 세션과 같이 쓴다(같은 키, 같은 모델). --fresh-cache이면 이번 실행만의 디렉터리(run-<실행 ID>-<이름>)를 쓴다.
+    프로필이 들어가는 요청은 이 클라이언트로 보내지 않으므로 프로필 캐시는 켜지 않는다.
+    """
+    results_dir = Path(results_dir)
+    name = f"run-{session.usage.run_id}-{cache_dir_name}" if args.fresh_cache else cache_dir_name
+    return CachedClient(session.gemini, usage=session.usage, extract_dir=results_dir / "llm_cache" / name,
+                        profile_dir=results_dir / "llm_cache" / "profile", cache_profile=False)

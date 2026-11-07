@@ -154,13 +154,36 @@ def test_ai_run_stops_before_any_call_when_budget_is_short(ai_env, monkeypatch, 
     assert e.value.code == 2 and "시작하지 않았다" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("left,starts", [(48, True), (47, False), (12, False)])
+def test_ai_budget_boundary_is_the_maximum_attempts_not_the_logical_calls(ai_env, monkeypatch, capsys, left, starts):
+    """이슈 #16에서 --gate ai와 같은 단위로 통일했다: 점검 값은 6건 x 2단계 x (1 + 재시도 3) = 48이고, 정상 실행의 호출 12회가 아니다."""
+    _, postings = ai_env
+    calls = []
+
+    class Limited(Routing):
+        def ensure_budget(self, needed):
+            super().ensure_budget(needed)
+            if needed > left:
+                raise LLMQuotaExceeded(f"오늘 남은 호출 {left}회, 필요한 호출 {needed}회")
+
+        def _complete(self, request):
+            calls.append(request.stage)
+            return super()._complete(request)
+
+    monkeypatch.setattr(tool, "GeminiClient", Limited)
+    with pytest.raises(SystemExit) as e:
+        tool.main(ai_args(postings))
+    assert (e.value.code == 0) is starts and (len(calls) == 12) is starts  # 시작하면 실제 호출은 12회, 못 시작하면 0회
+    assert starts or ("시작하지 않았다" in capsys.readouterr().err and calls == [])
+
+
 def test_ai_run_with_routing_client_matches_policy_and_keeps_profile_off_disk(ai_env, capsys):
     tmp, postings = ai_env
     with pytest.raises(SystemExit) as e:
         tool.main(ai_args(postings))
     out = capsys.readouterr().out
     assert e.value.code == 0 and "종합 판정 일치 6/6" in out and "m-test" in out
-    assert Routing.needed == 12  # 시작 전에 필요한 호출 수(공고 6 + 근거 6)를 점검한다
+    assert Routing.needed == 48  # 시작 전에 필요한 최대 시도 수(공고 6 x 2단계 x (1 + 재시도 3))를 점검한다
     assert not (tmp / "results" / "llm_cache" / "profile").exists()  # 프로필이 든 결과는 기본으로 디스크에 남지 않는다
     assert len(list((tmp / "results" / "llm_cache" / "extract").glob("*.json"))) == 6
 
