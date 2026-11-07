@@ -301,3 +301,30 @@ def test_quiet_summary_lists_every_step_and_the_exit_code(rdir, capsys):
     lines = rp.render_result(rp.execute(plan), quiet=True)
     assert [line.split()[0] for line in lines[1:7]] == list(rp.STEP_NAMES)
     assert "portfolio failed stage_failed" in lines and lines[-1] == "종료 코드 1"
+
+
+# ---------------------------------------------------------------- 결함은 숨기지 않는다
+
+@pytest.mark.parametrize("error", [TypeError("초안 코드의 결함"), KeyError("fact_ids"), AttributeError("x")])
+def test_defects_in_the_writer_path_propagate_instead_of_becoming_a_failed_step(rdir, error):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_cover_letter", "sample-3"): error})
+    with pytest.raises(type(error)):
+        rp.execute(plan)
+
+
+def test_configuration_and_permission_errors_are_not_swallowed(rdir):
+    from core.llm_client import LLMConfigError
+
+    for error in (LLMConfigError("키 없음"), PermissionError("허용 없음")):
+        plan = plan_for()
+        plan.writer_client = Wrap(plan.writer_client, {("write_portfolio", "sample-3"): error})
+        with pytest.raises(type(error)):
+            rp.execute(plan)
+
+
+def test_a_defect_in_a_judge_stage_is_not_hidden_as_a_selection_failure(rdir):
+    plan = plan_for()
+    plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-3"): TypeError("판정 코드의 결함")})
+    with pytest.raises(TypeError):
+        rp.execute(plan)

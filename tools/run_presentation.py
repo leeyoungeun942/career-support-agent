@@ -39,6 +39,7 @@ from tools.demo_support import (
     job_info,
     load_run,
     render,
+    render_draft,
     save_draft_md,
     save_run,
 )
@@ -346,8 +347,6 @@ def render_result(result: PresentationResult, quiet: bool = False) -> list[str]:
 
 
 def render_drafts(result: PresentationResult) -> list[str]:
-    from tools.demo_support import render_draft
-
     lines = []
     for kind in KINDS:
         if kind in result.drafts:
