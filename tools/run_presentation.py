@@ -415,8 +415,45 @@ def main(argv=None):
     sys.exit(result.exit_code)
 
 
-def build_ai_plan(args) -> Plan:  # Step 4에서 채운다
-    raise AiSetupError("실제 AI 실행은 아직 연결하지 않았다", EXIT_REFUSED)
+def build_ai_plan(args) -> Plan:
+    """--ai: 게이트·자격요건은 JUDGE 모델, 자소서·포트폴리오(와 --task-links ai)는 WRITER 모델로 부른다.
+
+    동의, 설정, 입력 파일, **모델별** 하루 호출 예산(최대 시도 수)을 모두 점검한 뒤에만 클라이언트를 돌려준다. 하나라도 안 되면 아무것도 보내지 않는다.
+    게이트 입력 파일이 없으면 안내 문구와 동의 점검에 들어가기 전에 멈춘다 (예산 계산에 필요하다).
+    """
+    demo_run_id = make_demo_run_id()
+    samples, _, _, _ = ev.load_fixtures()
+    ids = [s["job_id"] for s in samples]
+    logical, gate_attempts, elig_attempts, judge_calls = gate_ai_budget(args, len(ids))  # 입력 파일이 없으면 ScenarioError, 샘플 6건 밖이면 AiSetupError
+    writer_calls = (2 + (1 if args.task_links == "ai" else 0)) * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 (+ 연결 후보), 각각 재시도 포함
+    notice = ev.FREE_TIER_NOTICE + (
+        f"\n예상 호출(최대 시도, 재시도 {MAX_RETRIES}회 포함): JUDGE 게이트 최대 논리 {logical}회(시도 {gate_attempts}) + 자격요건 {elig_attempts} = {judge_calls}회, "
+        f"WRITER {writer_calls}회. 두 역할이 같은 모델이면 합계 {judge_calls + writer_calls}회를 그 모델의 남은 한도와 비교한다. 게이트는 공고의 업무 문장만 보낸다.")
+    loaded: dict[str, str] = {}
+
+    def load_inputs():
+        try:
+            loaded.update(ev.load_postings(Path(args.postings)))
+        except FileNotFoundError as e:
+            raise AiSetupError(f"실행할 수 없다: {e}") from None
+        if missing := [i for i in ids if i not in loaded]:
+            raise AiSetupError(f"공고 원문이 없는 표본: {missing}")
+
+    roles = prepare_roles(args, notice=notice, judge_calls=judge_calls, writer_calls=writer_calls, results_dir=RESULTS_DIR, env_loader=load_env,
+                          client_cls=GeminiClient, before_client=load_inputs, usage_run_id=demo_run_id)
+    gate_client = extra_cached_client(roles.judge, args, results_dir=RESULTS_DIR, cache_dir_name="gate")
+    jobs, profile, desired, _ = build_scenario("ai", args.gate_cases, loaded, gate_client)
+    postings_file = Path(args.postings)
+    postings_file = postings_file.relative_to(REPO) if postings_file.is_relative_to(REPO) else postings_file
+    judge, writer = roles.judge.settings, roles.writer.settings
+    return Plan(
+        mode="ai", demo_run_id=demo_run_id, jobs=jobs, profile=profile, desired_family=desired,
+        extract_client=roles.judge.client, evidence_client=roles.judge.client, writer_client=roles.writer.client, results_dir=RESULTS_DIR,
+        gate_client=gate_client, usage=roles.usage, gate_cases=Path(args.gate_cases), task_links=args.task_links,
+        cache_mode="fresh" if args.fresh_cache else ("disk" if args.cache_profile else "memory"),
+        models={"judge": judge.model, "writer": writer.model}, limits={judge.model: judge.rpd, writer.model: writer.rpd},
+        posting_ref=f"{postings_file.as_posix()}#{PRESENTATION_JOB_ID}",
+    )
 
 
 if __name__ == "__main__":

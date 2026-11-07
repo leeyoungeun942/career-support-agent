@@ -1,5 +1,4 @@
 """tools/run_presentation.py의 mock dry-run (정책 presentation.md 3·4·6장; 이슈 #24). 네트워크를 쓰지 않는다."""
-import json
 from datetime import datetime, timezone
 
 import pytest
