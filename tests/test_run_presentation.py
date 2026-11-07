@@ -1,0 +1,248 @@
+"""tools/run_presentation.py의 mock dry-run (정책 presentation.md 3·4·6장; 이슈 #24). 네트워크를 쓰지 않는다."""
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from agents.application_writer import DraftError
+from core.llm_client import LLMQuotaExceeded, LLMStageError
+from pipeline_helpers import PROFILE, Wrap
+from tools import demo_support as ds
+from tools import run_demo as demo
+from tools import run_presentation as rp
+
+KINDS = ("cover_letter", "portfolio")
+
+
+@pytest.fixture
+def rdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(rp, "RESULTS_DIR", tmp_path / "results")
+    return tmp_path / "results"
+
+
+def plan_for(*argv):
+    return rp.build_mock_plan(rp.build_parser().parse_args(list(argv)))
+
+
+def main(*argv):
+    with pytest.raises(SystemExit) as e:
+        rp.main(list(argv))
+    return e.value.code
+
+
+def statuses(result):
+    return {n: s.status for n, s in result.steps.items()}
+
+
+# ---------------------------------------------------------------- 끝까지 연결
+
+def test_the_whole_flow_runs_with_mock_and_exits_0(rdir, capsys):
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "mock dry-run" in out and "demo_run_id: demo-" in out and "pipeline_run_id: " in out
+    positions = [out.index(f"[{i}]") for i in rp.EXPECTED_RANKING]
+    assert positions == sorted(positions)  # 순위 3,1,4,5,2,6
+    assert "[4] 선택 공고: sample-3" in out and "[6] 자기소개서: 완료" in out and "[7] 포트폴리오: 완료" in out
+    assert "참고: 정책 14장 기대 순위와 같음" in out and "모든 공고에 자기소개서를 만들지 않는다" in out
+    (saved,) = list((rdir / "pipeline").glob("*.json"))
+    assert demo.load_run(saved).ranking == rp.EXPECTED_RANKING
+
+
+def test_execute_returns_both_drafts_and_every_step_completed(rdir):
+    result = rp.execute(plan_for())
+    assert statuses(result) == {n: "completed" for n in rp.STEP_NAMES} and result.exit_code == 0
+    assert set(result.drafts) == set(KINDS) and all(d.job_id == "sample-3" and d.meta.mode == "mock" for d in result.drafts.values())
+    assert result.fact_counts and result.fact_counts["usable_facts"] > 0 and result.fact_ids["usable_facts"][0] == "F1"
+
+
+def test_the_shared_helpers_are_the_same_objects_in_both_tools():
+    for name in ("build_scenario", "ScenarioError", "save_run", "load_run", "render", "gate_ai_budget", "save_draft_md", "render_draft", "KIND_LABEL"):
+        assert getattr(demo, name) is getattr(ds, name)
+    assert demo._job_info is ds.job_info
+    assert "run_demo" not in open(rp.__file__, encoding="utf-8").read().split('"""')[2]  # run_presentation은 run_demo를 가져오지 않는다
+
+
+# ---------------------------------------------------------------- 메모리 원본과 저장본, WriterInput
+
+def test_sample_3_is_selected_from_the_memory_original_not_the_saved_copy(rdir):
+    result = rp.execute(plan_for())
+    assert result.pipeline_run.profile_evidence_included is True  # 메모리 원본은 프로필 인용을 갖고 있다
+    assert result.saved_run.profile_evidence_included is False  # 저장본은 인용이 없다
+    assert result.saved_run == demo.load_run(result.saved_path)
+    # 저장본으로는 WriterInput의 사실을 만들 수 없다는 것도 확인한다
+    from core.selection import select_job
+    from core.writer_input import WriterInputError, build_writer_input
+
+    stripped = select_job(result.saved_run, "sample-3", include_profile_evidence=False)
+    with pytest.raises(WriterInputError):
+        build_writer_input(stripped, PROFILE, ds.job_info("sample-3"))
+
+
+def test_writer_input_and_profile_text_are_never_written_to_disk(rdir, capsys):
+    main()
+    out = capsys.readouterr().out
+    files = [p for p in rdir.rglob("*") if p.is_file()]
+    assert files and not any("writer" in p.name.lower() and "input" in p.name.lower() for p in files)
+    pieces = [a for e in PROFILE.experiences for a in e.actions] + [e.title for e in PROFILE.experiences]
+    assert len(pieces) > 5
+    for text in (out, *(p.read_text(encoding="utf-8") for p in files)):
+        assert all(piece not in text for piece in pieces)  # 프로필 인용·경험 원문이 화면·결과 파일에 없다
+    assert not (rdir / "drafts").exists()  # mock은 초안 파일을 만들지 않는다
+
+
+def test_no_network_client_is_created_without_ai(rdir, monkeypatch):
+    monkeypatch.setattr(rp, "GeminiClient", lambda *a, **k: pytest.fail("--ai 없이 클라이언트를 만들었다"))
+    plan = plan_for()
+    assert plan.mode == "mock" and not plan.external and plan.usage is None and plan.gate_client is None
+    assert main() == 0
+
+
+# ---------------------------------------------------------------- 자소서 ↔ 포트폴리오 독립
+
+def writer_calls(plan):
+    return [k for k in plan.writer_client.calls]
+
+
+def test_each_draft_is_requested_exactly_once(rdir):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client)
+    result = rp.execute(plan)
+    assert plan.writer_client.calls == [("write_cover_letter", "sample-3"), ("write_portfolio", "sample-3")] and result.exit_code == 0
+
+
+@pytest.mark.parametrize("error,code", [
+    (LLMStageError("통신 실패 SECRET-DETAIL"), "stage_failed"),
+    (DraftError("unsupported_token", "SECRET-DETAIL"), "unsupported_token"),
+])
+def test_a_cover_letter_failure_does_not_remove_the_portfolio_or_the_ranking(rdir, capsys, error, code):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_cover_letter", "sample-3"): error})
+    result = rp.execute(plan)
+    assert (result.steps["cover_letter"].status, result.steps["cover_letter"].code) == ("failed", code)
+    assert result.steps["portfolio"].status == "completed" and set(result.drafts) == {"portfolio"}
+    assert result.saved_run.ranking == rp.EXPECTED_RANKING and result.exit_code == 1
+    text = "\n".join(rp.render_result(result))
+    assert "SECRET-DETAIL" not in text and "[6] 자기소개서: 실패" in text and "[7] 포트폴리오: 완료" in text
+
+
+def test_a_portfolio_failure_keeps_the_ranking_and_the_cover_letter(rdir):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_portfolio", "sample-3"): DraftError("missing_evidence")})
+    result = rp.execute(plan)
+    assert result.steps["cover_letter"].status == "completed" and result.steps["portfolio"].status == "failed"
+    assert set(result.drafts) == {"cover_letter"} and result.saved_run.ranking == rp.EXPECTED_RANKING and result.exit_code == 1
+    assert list((rdir / "pipeline").glob("*.json"))  # 저장된 결과는 그대로다
+
+
+def test_quota_exhaustion_in_the_cover_letter_leaves_the_portfolio_not_run(rdir, capsys):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_cover_letter", "sample-3"): LLMQuotaExceeded("SECRET-DETAIL")})
+    result = rp.execute(plan)
+    assert (result.steps["cover_letter"].status, result.steps["cover_letter"].code, result.steps["portfolio"].status) == ("failed", "quota_exhausted", "not_run")
+    assert plan.writer_client.calls == [("write_cover_letter", "sample-3")] and result.exit_code == 3
+    assert main() == 0  # 정상 실행은 그대로
+    capsys.readouterr()
+
+
+# ---------------------------------------------------------------- sample-3을 선택할 수 없을 때: 대체하지 않는다
+
+@pytest.mark.parametrize("error,code,exit_code", [
+    (LLMStageError("근거 단계 실패"), "stage_failed", 4),
+    (LLMQuotaExceeded("한도 소진"), "quota_exhausted", 3),
+])
+def test_when_sample_3_cannot_be_selected_nothing_else_is_substituted(rdir, error, code, exit_code):
+    plan = plan_for()
+    plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-3"): error})
+    plan.writer_client = Wrap(plan.writer_client)
+    result = rp.execute(plan)
+    assert (result.steps["selection"].status, result.steps["selection"].code) == ("failed", code)
+    assert [result.steps[n].status for n in ("writer_input", "cover_letter", "portfolio")] == ["not_run"] * 3
+    assert plan.writer_client.calls == [] and result.drafts == {}  # 다른 공고로 대체하지 않고 Writer를 부르지 않는다
+    assert result.exit_code == exit_code
+    assert result.saved_run is not None and "sample-3" not in result.saved_run.ranking  # 저장된 순위는 남는다
+    if code == "stage_failed":
+        assert result.saved_run.ranking and result.saved_run.ranking[0] != "sample-3"
+
+
+def test_the_screen_names_the_reason_when_the_selection_failed(rdir):
+    plan = plan_for()
+    plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-3"): LLMStageError("x")})
+    text = "\n".join(rp.render_result(rp.execute(plan)))
+    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (stage_failed)" in text and "[6] 자기소개서: 안 함" in text
+
+
+# ---------------------------------------------------------------- 저장·재로딩 검증이 Writer의 선행 조건
+
+def test_a_save_failure_stops_before_any_writer_call(rdir, monkeypatch):
+    def broken_save(*a, **k):
+        raise OSError("디스크 가득 SECRET-DETAIL")
+
+    monkeypatch.setattr(rp, "save_run", broken_save)
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client)
+    result = rp.execute(plan)
+    assert (result.steps["persistence"].status, result.steps["persistence"].code) == ("failed", "persistence_failed")
+    assert [result.steps[n].status for n in ("selection", "writer_input", "cover_letter", "portfolio")] == ["not_run"] * 4
+    assert plan.writer_client.calls == [] and result.exit_code == 4 and result.pipeline_run_id is None
+    text = "\n".join(rp.render_result(result))
+    assert "SECRET-DETAIL" not in text and "1위 [sample-3]" in text  # 순위 화면은 보인다
+
+
+def test_a_reload_mismatch_stops_before_any_writer_call(rdir, monkeypatch):
+    real = rp.load_run
+    monkeypatch.setattr(rp, "load_run", lambda path: real(path).model_copy(update={"created_at": datetime(2000, 1, 1, tzinfo=timezone.utc)}))
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client)
+    result = rp.execute(plan)
+    assert (result.steps["persistence"].status, result.steps["persistence"].code) == ("failed", "reload_mismatch")
+    assert plan.writer_client.calls == [] and result.drafts == {} and result.exit_code == 4
+
+
+def test_an_unreadable_saved_file_is_a_persistence_failure(rdir, monkeypatch):
+    def unreadable(path):
+        raise ValueError("형식이 틀림 SECRET-DETAIL")
+
+    monkeypatch.setattr(rp, "load_run", unreadable)
+    result = rp.execute(plan_for())
+    assert result.steps["persistence"].code == "persistence_failed" and result.exit_code == 4
+
+
+def test_a_validation_defect_while_saving_is_not_hidden_as_a_persistence_failure(rdir, monkeypatch):
+    def defective(*a, **k):
+        raise ValueError("검증 결함")
+
+    monkeypatch.setattr(rp, "save_run", defective)
+    with pytest.raises(ValueError, match="검증 결함"):
+        rp.execute(plan_for())
+
+
+# ---------------------------------------------------------------- run_id: 저장본이 공식 ID
+
+def test_when_the_file_name_is_taken_the_saved_run_id_is_the_official_one_everywhere(rdir, monkeypatch):
+    taken, fresh = "20261107T000000Z-aaaaaa", "20261107T000000Z-bbbbbb"
+    monkeypatch.setattr("core.pipeline.make_run_id", lambda now=None: taken)
+    monkeypatch.setattr(ds, "make_run_id", lambda now=None: fresh)
+    (rdir / "pipeline").mkdir(parents=True)
+    (rdir / "pipeline" / f"{taken}.json").write_text("{}", encoding="utf-8")  # 같은 이름의 파일이 이미 있다
+    result = rp.execute(plan_for())
+    assert result.pipeline_run_id == fresh and result.saved_path.name == f"{fresh}.json"
+    assert result.pipeline_run.run_id == fresh  # 메모리 원본도 저장본 값으로 맞췄다
+    assert all(d.run_id == fresh for d in result.drafts.values())  # 선택 결과와 WriterInput 메타를 거친 초안의 ID
+    assert result.demo_run_id.startswith("demo-") and result.demo_run_id != fresh
+    assert (rdir / "pipeline" / f"{taken}.json").read_text(encoding="utf-8") == "{}"  # 남의 파일을 덮어쓰지 않았다
+    assert fresh in "\n".join(rp.render_result(result))
+
+
+# ---------------------------------------------------------------- 명령줄
+
+def test_flags_that_are_refused(rdir, capsys):
+    assert main("--real-profile") == 2 and "구현하지 않았다" in capsys.readouterr().err
+    assert main("--task-links", "ai") == 2 and "--ai와 함께" in capsys.readouterr().err
+    assert main("--scenario", "other") == 2
+    assert not (rdir / "pipeline").exists()
+
+
+def test_quiet_prints_states_and_ranking_only(rdir, capsys):
+    assert main("-q") == 0
+    out = capsys.readouterr().out
+    assert "순위: " in out and "persistence completed -" in out and "종료 코드 0" in out and "WriterInput" not in out
