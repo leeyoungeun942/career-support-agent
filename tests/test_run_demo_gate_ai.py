@@ -242,3 +242,15 @@ def test_select_job_refuses_gate_failed_and_gate_stage_not_run():
     for job_id in ("sample-1", "sample-3", "sample-6"):  # 게이트가 끝난 not_run, 소진된 공고, 시작하지 않은 공고
         with pytest.raises(SelectionRefused, match="평가를 마치지 못해"):
             select_job(exhausted, job_id)
+
+
+def test_call_summary_warns_only_when_a_stage_went_over_its_computed_maximum():
+    from pipeline_helpers import run
+
+    base = run().run_info
+    budget = (25, 100, 48, 148)
+    ok = base.model_copy(update={"gate_logical_calls": 25, "gate_attempts": 30, "eligibility_logical_calls": 12, "eligibility_attempts": 12})
+    assert not any("경고" in line for line in demo.render_gate_ai_calls(ok, budget))
+    for change in ({"gate_logical_calls": 26}, {"gate_attempts": 101}, {"eligibility_attempts": 49}):
+        over = ok.model_copy(update=change)
+        assert any("경고: 실제 호출이" in line for line in demo.render_gate_ai_calls(over, budget))

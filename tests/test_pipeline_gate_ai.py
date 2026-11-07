@@ -156,9 +156,10 @@ def test_gate_ai_run_records_gate_model_prompt_and_mode():
 def test_same_model_is_required_for_both_stages():
     mock_e, mock_j = clients()
     mock_e.model = mock_j.model = "m-1"
-    jobs, _ = jobs_with()
+    jobs, judges = jobs_with()
     with pytest.raises(ValueError, match="모델이 다르다"):
         run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="m-2"), now=NOW)
+    assert all(judge.calls == 0 for judge in judges.values())  # 게이트를 돌리기 전에 거부한다(호출을 쓰지 않는다)
     ok = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="m-1"), now=NOW)
     assert (ok.run_info.model_id, ok.run_info.gate_model_id) == ("m-1", "m-1")
 

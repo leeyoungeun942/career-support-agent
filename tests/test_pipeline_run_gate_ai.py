@@ -197,3 +197,44 @@ def test_run_totals_split_by_stage_and_logical_calls_collapse_retries(tmp_path):
 def test_usage_filters_on_an_empty_log_are_zero(tmp_path):
     usage = UsageLog(tmp_path / "none.jsonl", run_id="r1")
     assert usage.run_totals(stage="gate_label")["calls"] == 0 and usage.logical_calls(stage="gate_label") == 0
+
+
+# ---------------------------------------------------------------- 문서 ↔ 코드 (data-contract 3-1, 3-3)
+
+CONTRACT = Path(__file__).resolve().parents[1] / "docs" / "data-contract.md"
+
+
+def _section(start, end):
+    text = CONTRACT.read_text(encoding="utf-8")
+    return text[text.index(start):text.index(end, text.index(start))]
+
+
+def _rows(section):
+    import re
+
+    return [[c.strip() for c in line.strip().strip("|").split("|")] for line in section.splitlines() if re.match(r"\| `", line)]
+
+
+def test_contract_3_3_failure_codes_match_the_screen_texts_and_statuses_in_code():
+    import re
+
+    section = _section("| `failure_code` | 쓰는 상태", "- 오류 메시지의 원문")
+    documented = {}
+    for code, statuses, _, text in _rows(section):
+        code = code.strip("`")
+        for status in re.findall(r"`(failed|not_run)`", statuses):
+            documented.setdefault(code, {})[status] = None
+        for status, shown in zip(re.findall(r"`(failed|not_run)`", statuses), text.split(" / ")):
+            documented[code][status] = shown if " / " in text else text
+    in_code = {}
+    for (status, code), shown in FAILURE_TEXT.items():
+        in_code.setdefault(code, {})[status] = shown
+    assert documented == in_code
+
+
+def test_contract_3_1_run_info_columns_are_exactly_the_fields_of_run_info():
+    import re
+
+    section = _section("`run_info`\n", "**호출 수의 정의.**")
+    documented = {name for row in _rows(section) for name in re.findall(r"`([a-z_]+)`", row[0])}
+    assert documented == set(RunInfo.model_fields)
