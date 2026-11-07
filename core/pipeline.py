@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from agents.job_analyzer import extract_requirements
 from agents.profile_analyzer import find_evidence
 from core.job_gate import POSTING_KEYS, AiJudge, Dictionary
+from core.job_gate_ai import STAGE as GATE_STAGE
 from core.job_gate_result import judge_posting
 from core.llm_client import LLMClient, LLMQuotaExceeded, LLMStageError, UsageLog
 from core.pipeline_run import PipelineJob, PipelineRun, ProfileRef, PromptVersions, RunInfo
@@ -56,9 +57,12 @@ def make_run_id(now: datetime | None = None) -> str:
     return f"{(now or datetime.now(timezone.utc)):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
 
 
-def _fingerprint(job_ids: list[str], model_id: str | None, prompts: PromptVersions, config_id: str | None) -> str:
-    """재현 확인용 단방향 해시. 식별자와 버전만 넣고 프로필·공고 원문은 넣지 않는다."""
+def _fingerprint(job_ids: list[str], model_id: str | None, prompts: PromptVersions, config_id: str | None,
+                 gate: tuple[str, str] | None = None) -> str:
+    """재현 확인용 단방향 해시. 식별자와 버전만 넣고 프로필·공고 원문은 넣지 않는다. gate는 (게이트 모델 ID, 프롬프트 버전)이고 게이트 AI일 때만 넣는다."""
     basis = {"jobs": job_ids, "model": model_id, "prompts": prompts.model_dump(), "config": config_id}
+    if gate is not None:
+        basis["gate"] = list(gate)  # 게이트 AI가 아닌 실행의 지문은 이전과 같다
     return hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -99,13 +103,16 @@ def _check_gate_posting(posting) -> None:
 def run_pipeline(
     jobs: Sequence[ScenarioJob], profile: EligibilityProfile, profile_ref: ProfileRef, extract_client: LLMClient,
     evidence_client: LLMClient, *, desired_family: str | None = None, gate_judge: AiJudge | None = None,
-    allow_external_profile: bool = False, usage: UsageLog | None = None, cache_mode: str = "memory",
-    now: datetime | None = None, run_id: str | None = None,
+    gate_client: LLMClient | None = None, allow_external_profile: bool = False, usage: UsageLog | None = None,
+    cache_mode: str = "memory", now: datetime | None = None, run_id: str | None = None,
 ) -> PipelineRun:
     """공고들을 게이트와 자격요건으로 평가하고 정렬해 PipelineRun을 돌려준다. 점수는 계산하지 않는다 (정책 14장).
 
     - 모든 입력 공고가 결과에 남는다. 공고 하나가 실패하면 그 공고만 failed로 두고 이어간다. 호출 한도가 소진되면 그 공고는
       failed, 뒤 공고는 not_run으로 두고 멈춘다. 정렬은 completed인 공고만 한다 (D6).
+    - 게이트 AI(gate_client를 주면 gate_mode=ai, 모델과 사용량을 기록한다. 공고별 gate_judge는 호출하는 쪽이 그 클라이언트로 만들어 넘긴다): 판정 호출의
+      LLMStageError는 그 공고의 gate_failed, LLMQuotaExceeded는 그 공고의 quota_exhausted다. 게이트는 공고 전체를 먼저 훑으므로 한도가 소진되면
+      남은 공고의 게이트도 자격요건도 시작하지 않는다(앞 공고는 게이트 결과를 남기고 not_run). 판정 함수의 결함(TypeError 등)은 숨기지 않고 그대로 올린다 (data-contract 3-3).
     - 입력 자체가 틀린 것(같은 job_id, 주입한 게이트의 job_id 불일치, 게이트 실행에 필요한 인자 없음, 두 클라이언트의 모델 불일치)은
       공고별 상태가 아니라 실행 거부(ValueError)다. PermissionError(외부 클라이언트에 허용 없이 프로필을 보냄)도 그대로 올린다.
     - 게이트 detail은 비운다. detail에는 공고 업무 항목 원문이 들어 있어 실행 결과에 공고 원문을 남기지 않는다는 규칙과 맞지 않는다.
@@ -125,19 +132,35 @@ def run_pipeline(
         raise ValueError("게이트를 실행하려면 desired_family가 필요하다")
     if lacking := [j.job_id for j in jobs if j.gate is None and (j.gate_judge or gate_judge) is None]:
         raise ValueError(f"게이트를 실행하려면 gate_judge가 필요하다: {lacking}")
+    if gate_client is not None:
+        if all(injected):
+            raise ValueError("주입한 게이트 결과와 gate_client(게이트 AI)를 함께 쓸 수 없다")
+        if evidence_client.model != "mock" and gate_client.model != evidence_client.model:
+            raise ValueError(f"게이트({gate_client.model})와 자격요건({evidence_client.model})의 모델이 다르다: 두 단계는 같은 모델의 한도를 나눠 쓴다")
 
     gates: dict[str, JobGateResult | None] = {}
+    gate_ended: dict[str, tuple[str, str]] = {}  # 게이트 결과 없이 끝난 공고 -> (평가 상태, 실패 코드)
+    gate_stopped = False  # 게이트 단계에서 한도가 소진됐다
     dic = None if all(injected) else Dictionary()
     for job in jobs:
         if job.gate is not None:  # 주입한 결과도 실행한 결과와 같이 detail(공고 업무 항목 원문)을 비운다
             gates[job.job_id] = job.gate.model_copy(update={"detail": None})
             continue
+        gates[job.job_id] = None
+        if gate_stopped:  # 한도가 소진됐으면 남은 공고의 게이트는 입력 검사도 하지 않고 시작하지 않는다
+            gate_ended[job.job_id] = ("not_run", "quota_exhausted")
+            continue
         try:
             _check_gate_posting(job.gate_posting)
         except GateInputError:  # 입력 오류만 공고별 실패로 남긴다. 메시지는 옮기지 않는다
-            gates[job.job_id] = None
+            gate_ended[job.job_id] = ("failed", "input_invalid")
             continue
-        gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
+        try:
+            gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
+        except LLMQuotaExceeded:  # 판정 함수의 결함(TypeError 등)은 잡지 않는다
+            gate_ended[job.job_id], gate_stopped = ("failed", "quota_exhausted"), True
+        except LLMStageError:
+            gate_ended[job.job_id] = ("failed", "gate_failed")
 
     entries: dict[str, dict] = {}
     done: list[tuple[str, EligibilityResult]] = []
@@ -145,9 +168,10 @@ def run_pipeline(
     for job in jobs:
         gate = gates[job.job_id]
         base = {"job_id": job.job_id, "job_label": job.job_label, "gate": gate}
-        if gate is None:
-            entries[job.job_id] = {**base, "evaluation_status": "failed", "failure_code": "input_invalid"}
-        elif stopped:
+        if job.job_id in gate_ended:
+            status, code = gate_ended[job.job_id]
+            entries[job.job_id] = {**base, "evaluation_status": status, "failure_code": code}
+        elif gate_stopped or stopped:  # 같은 한도가 소진돼 자격요건 단계를 시작하지 않는다 (job-gate.md 1-1)
             entries[job.job_id] = {**base, "evaluation_status": "not_run", "failure_code": "quota_exhausted"}
         else:
             try:
@@ -166,19 +190,27 @@ def run_pipeline(
     prompts = PromptVersions(extract_requirements=load_prompt("extract_requirements")[0], find_evidence=load_prompt("find_evidence")[0])
     config_id = getattr(evidence_client, "config_id", "") or None
     model_id = None if evidence_client.model == "mock" else evidence_client.model
-    totals = usage.run_totals() if usage else {}
+    gate_prompt = load_prompt(GATE_STAGE)[0] if gate_client is not None else None
+    totals = usage.run_totals(exclude_stage=GATE_STAGE) if usage else {}  # 기존 칸은 자격요건 단계만 센다 (data-contract 3-1)
+    gate_totals = usage.run_totals(stage=GATE_STAGE) if usage else {}
     return PipelineRun(
         run_id=run_id or make_run_id(now),
-        input_fingerprint=_fingerprint(ids, model_id, prompts, config_id),
+        input_fingerprint=_fingerprint(ids, model_id, prompts, config_id, None if gate_client is None else (gate_client.model, gate_prompt)),
         created_at=now or datetime.now(timezone.utc),
         as_of_month=profile.as_of_month,
         profile=profile_ref,
         profile_evidence_included=True,
         run_info=RunInfo(
-            gate_mode="injected" if all(injected) else "mock", eligibility_mode="mock" if model_id is None else "ai",
+            gate_mode="injected" if all(injected) else ("mock" if gate_client is None else "ai"), eligibility_mode="mock" if model_id is None else "ai",
             model_id=model_id, prompt_versions=prompts, generation_config=config_id, cache_mode=cache_mode,
             cache_hits=totals.get("cache_hits", 0), input_tokens=totals.get("input_tokens", 0),
             output_tokens=totals.get("output_tokens", 0),
+            eligibility_logical_calls=usage.logical_calls(exclude_stage=GATE_STAGE) if usage else 0,
+            eligibility_attempts=totals.get("calls", 0),
+            gate_model_id=None if gate_client is None else gate_client.model, gate_prompt_version=gate_prompt,
+            gate_logical_calls=usage.logical_calls(stage=GATE_STAGE) if usage else 0, gate_attempts=gate_totals.get("calls", 0),
+            gate_cache_hits=gate_totals.get("cache_hits", 0), gate_input_tokens=gate_totals.get("input_tokens", 0),
+            gate_output_tokens=gate_totals.get("output_tokens", 0),
         ),
         jobs=[PipelineJob(**entries[i]) for i in ids],
     )
