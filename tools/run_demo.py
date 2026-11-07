@@ -12,9 +12,13 @@
     python -m tools.run_demo --select sample-3 --draft cover_letter --ai --accept-free-tier-terms --model ... --rpm ... --rpd ...
                                                   # 초안 작성 1회만 실제 Gemini. 자격요건과 게이트는 mock (가상 프로필과 샘플 공고만)
     python -m tools.run_demo --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
-                                                  # 자격요건 단계만 실제 Gemini. 게이트의 AI 자리는 mock이다 (실제 연결은 이슈 #12)
+                                                  # 자격요건 단계만 실제 Gemini. 게이트의 AI 자리는 mock이다
+    python -m tools.run_demo --gate ai --ai --accept-free-tier-terms [--fresh-cache] [--model ...]
+                                                  # 게이트도 자격요건도 실제 Gemini (이슈 #16). 두 단계의 최대 시도 수를 합쳐 시작 전에 점검한다. --draft와는 함께 쓰지 않는다
 
 게이트: data/sample-jobs/gate_sample_cases.json(커밋하지 않는 파일)이 있으면 실제 게이트 규칙을 mock AI 자리로 돌린다. 없으면 fixture의 게이트 결과를 넣는다.
+--gate ai는 같은 입력 파일로 게이트 규칙은 그대로 두고 AI 자리만 실제 모델(core/job_gate_ai.py)로 바꾼다. 입력 파일이 없으면 시작 전에 안내하고 멈춘다.
+게이트 AI 호출이 실패한 공고는 gate_failed로 남기고 나머지를 이어 간다. 한도가 소진되면 남은 공고의 게이트와 모든 자격요건 평가를 시작하지 않는다 (data-contract 3-3).
 공고 수집·항목 분리는 이 도구의 범위 밖이다. 사전에 준비한 입력을 읽는다.
 점수는 계산하지 않는다. 순위는 ranking_group -> verdict -> 입력 순서다 (정책 14장).
 결과는 data/results/pipeline/<run_id>.json에 저장한다(커밋하지 않음). 기본으로는 프로필 원문 인용을 빼고 저장한다.
@@ -29,6 +33,7 @@ import re
 import sys
 from pathlib import Path
 
+from core.job_gate_ai import make_llm_judge
 from core.job_gate_mock import make_label_mock
 from agents.application_writer import KINDS, SECTIONS, ApplicationDraft, DraftError, make_writer_mock, write_application
 from agents.task_linker import build_links, link_tasks
@@ -40,7 +45,8 @@ from core.schemas import DISPLAY_LABELS
 from core.selection import JOB_ID_PATTERN, SelectedJob, SelectionRefused, select_job
 from core.writer_input import JobInfo, WriterInputError, build_writer_input
 from tools import eval_eligibility as ev
-from tools.ai_common import AiSetupError, prepare_session
+from tools import eval_gate as eg
+from tools.ai_common import AiSetupError, extra_cached_client, prepare_session
 
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ev.RESULTS_DIR
@@ -61,10 +67,11 @@ def _label(code):
 
 # ---------------------------------------------------------------- 시나리오 만들기
 
-def build_scenario(gate_source: str = "auto", gate_cases_path: Path | None = None, posting_texts: dict[str, str] | None = None):
+def build_scenario(gate_source: str = "auto", gate_cases_path: Path | None = None, posting_texts: dict[str, str] | None = None, gate_client=None):
     """(공고 목록, 프로필, 희망 직무군, 실제 게이트 방식). 입력이 어긋나면 ScenarioError.
 
-    gate_source: injected(fixture의 게이트 결과), mock(게이트 규칙 + mock AI 자리), auto(입력 파일이 있으면 mock, 없으면 injected).
+    gate_source: injected(fixture의 게이트 결과), mock(게이트 규칙 + mock AI 자리), ai(게이트 규칙 + 실제 AI 자리, gate_client 필요),
+    auto(입력 파일이 있으면 mock, 없으면 injected).
     posting_texts를 주면(--ai) 게이트 입력의 직무명이 그 공고 원문에 들어 있는지도 확인해 두 파일이 같은 공고인지 본다.
     """
     gate_cases_path = Path(gate_cases_path or GATE_CASES_JSON)
@@ -75,8 +82,10 @@ def build_scenario(gate_source: str = "auto", gate_cases_path: Path | None = Non
         gate_source = "mock" if gate_cases_path.exists() else "injected"
     texts = posting_texts or {s["job_id"]: synthetic_posting(s) for s in samples}
 
+    if gate_source == "ai" and gate_client is None:
+        raise ScenarioError("--gate ai에는 게이트 AI 클라이언트가 필요하다")
     raw = {}
-    if gate_source == "mock":
+    if gate_source in ("mock", "ai"):
         if not gate_cases_path.exists():
             raise ScenarioError(f"게이트 입력 파일이 없다: {gate_cases_path} (팀 Drive에서 받아 넣는다. 커밋하지 않는 파일)")
         raw = {c["no"]: c for c in ev._read_json(gate_cases_path)["cases"]}
@@ -100,7 +109,8 @@ def build_scenario(gate_source: str = "auto", gate_cases_path: Path | None = Non
         if posting_texts and case["job_title"] not in texts[job_id]:
             raise ScenarioError(f"{no}번: 게이트 입력의 직무명이 공고 원문({job_id})에 없다. 두 파일이 같은 공고가 아니다")
         posting = {"job_title": case["job_title"], "position": case["position"], "items": case["items"]}
-        jobs.append(ScenarioJob(**base, gate_posting=posting, gate_judge=make_label_mock(exp["item_labels"])))
+        judge = make_llm_judge(gate_client, job_id) if gate_source == "ai" else make_label_mock(exp["item_labels"])
+        jobs.append(ScenarioJob(**base, gate_posting=posting, gate_judge=judge))
     return jobs, profile, desired, gate_source
 
 
@@ -121,8 +131,11 @@ def render(run: PipelineRun, quiet: bool = False) -> list[str]:
         return lines
     who = "가상 프로필" if run.profile.is_synthetic else "프로필"
     model = f"AI {info.model_id}" if info.eligibility_mode == "ai" else "mock"
-    gate = {"injected": "fixture 결과 사용", "mock": "규칙 + mock AI 자리"}[info.gate_mode]
-    lines.append(f"=== 시연: {run.profile.profile_id}({who}) / 공고 {len(run.jobs)}건 / 게이트: {gate} / 자격요건: {model} / 실행 {run.run_id} ===")
+    gate = {"injected": "fixture 결과 사용", "mock": "규칙 + mock AI 자리", "ai": "실제 AI"}[info.gate_mode]
+    if info.gate_mode == "ai":  # 두 단계 모두 실제 AI다. 같은 모델을 쓴다 (data-contract 3-1)
+        lines.append(f"=== 시연: {run.profile.profile_id}({who}) / 공고 {len(run.jobs)}건 / 게이트: 실제 AI / 자격요건: 실제 AI / 모델 {info.gate_model_id} / 실행 {run.run_id} ===")
+    else:
+        lines.append(f"=== 시연: {run.profile.profile_id}({who}) / 공고 {len(run.jobs)}건 / 게이트: {gate} / 자격요건: {model} / 실행 {run.run_id} ===")
     lines.append("점수는 계산하지 않았다. 순위는 직무 그룹 -> 자격요건 판정 -> 입력 순서다.")
     notice_shown = False
     for job in ranked:
@@ -401,12 +414,50 @@ def run_mock(args) -> int:
     return _finish(run, args, lambda job_id: f"synthetic-posting:{job_id} (fixture에서 만든 합성 공고, 실제 원문이 아니다)")
 
 
+def render_gate_ai_calls(info, budget) -> list[str]:
+    """단계별 호출 숫자(논리 호출, 시도, 캐시 적중)와 시작 전 점검한 최대 시도 수를 비교해 낸다. 숫자만 낸다."""
+    logical, gate_max, elig_max, total_max = budget
+    total = info.gate_attempts + info.eligibility_attempts
+    lines = [f"게이트 호출: 논리 {info.gate_logical_calls}회(최대 {logical}), 시도 {info.gate_attempts}회(최대 {gate_max}), 캐시 적중 {info.gate_cache_hits}",
+             f"자격요건 호출: 논리 {info.eligibility_logical_calls}회, 시도 {info.eligibility_attempts}회(최대 {elig_max}), 캐시 적중 {info.cache_hits}",
+             f"시도 합계 {total}회(최대 {total_max})"]
+    if info.gate_logical_calls > logical or info.gate_attempts > gate_max or info.eligibility_attempts > elig_max:
+        lines.append("경고: 실제 호출이 계산한 최대치를 넘었다. 호출 예산 계산에 결함이 있다.")
+    return lines
+
+
+def gate_ai_budget(args, job_count: int) -> tuple[int, int, int, int]:
+    """--gate ai의 호출 예산: (게이트 최대 논리 호출, 게이트 최대 시도, 자격요건 최대 시도, 합계 최대 시도).
+
+    두 단계는 같은 키·같은 모델의 일일 한도를 나눠 쓰므로 최대 시도 수를 합쳐 비교한다 (정책 job-gate.md 5-2). 게이트 최대 논리 호출은
+    tools.eval_gate와 같은 계산이다. 입력 파일이 없거나 어긋나면 ScenarioError, 샘플 6건 밖이면 AiSetupError.
+    """
+    try:
+        desired, cases = eg.load_sample(args.gate_cases)
+    except (FileNotFoundError, ValueError) as e:
+        raise ScenarioError(str(e)) from None
+    eg.check_ai_scope(cases)
+    _, logical = eg.ai_call_bounds(cases, desired)
+    gate_attempts = logical * (1 + MAX_RETRIES)
+    elig_attempts = 2 * job_count * (1 + MAX_RETRIES)  # 공고당 요건 추출 1 + 근거 찾기 1, 각각 재시도 포함
+    return logical, gate_attempts, elig_attempts, gate_attempts + elig_attempts
+
+
 def run_ai(args) -> int:
-    """자격요건 단계만 실제 Gemini로 돌린다. 게이트의 AI 자리는 mock이다."""
+    """자격요건 단계를 실제 Gemini로 돌린다. 게이트의 AI 자리는 mock이고, --gate ai이면 게이트도 실제 Gemini다."""
+    gate_ai = args.gate == "ai"
+    budget = None
     try:
         samples, profile, _, _ = ev.load_fixtures()
-        session = ev.prepare_ai(args, [s["job_id"] for s in samples], RESULTS_DIR)
-        jobs, profile, desired, _ = build_scenario(args.gate, args.gate_cases, session.postings)
+        extra = {}
+        if gate_ai:  # 게이트 입력 파일이 없으면 안내 문구와 동의 점검에 들어가기 전에 멈춘다
+            budget = gate_ai_budget(args, len(samples))
+            extra = dict(needed_calls=budget[3], notice=ev.FREE_TIER_NOTICE + (
+                f"\n예상 호출: 게이트 최대 논리 {budget[0]}회(최대 시도 {budget[1]}회) + 자격요건 최대 시도 {budget[2]}회 = 최대 시도 합계 {budget[3]}회 "
+                f"(재시도 {MAX_RETRIES}회 포함). 게이트는 공고의 업무 문장만 보낸다."))
+        session = ev.prepare_ai(args, [s["job_id"] for s in samples], RESULTS_DIR, **extra)
+        gate_client = extra_cached_client(session, args, results_dir=RESULTS_DIR, cache_dir_name="gate") if gate_ai else None
+        jobs, profile, desired, _ = build_scenario(args.gate, args.gate_cases, session.postings, gate_client)
     except ev.AiSetupError as e:
         print(e, file=sys.stderr)
         return e.code
@@ -417,11 +468,13 @@ def run_ai(args) -> int:
         print(f"실행할 수 없다: {problem}", file=sys.stderr)  # 호출을 쓰기 전에 거른다
         return EXIT_REFUSED
     cache_mode = "fresh" if args.fresh_cache else ("disk" if args.cache_profile else "memory")
-    run = run_pipeline(jobs, profile, PROFILE_REF, session.client, session.client, desired_family=desired,
+    run = run_pipeline(jobs, profile, PROFILE_REF, session.client, session.client, desired_family=desired, gate_client=gate_client,
                        allow_external_profile=True, usage=session.usage, cache_mode=cache_mode)
     postings_file = Path(args.postings)
     postings_file = postings_file.relative_to(REPO) if postings_file.is_relative_to(REPO) else postings_file
     code = _finish(run, args, lambda job_id: f"{postings_file.as_posix()}#{job_id}")
+    if gate_ai:
+        print("\n".join(render_gate_ai_calls(run.run_info, budget)))
     t, after = session.usage.run_totals(), session.usage.calls_today(session.settings.model)
     print(f"이번 실행({session.usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
           f"오늘 누적 {after}/{session.settings.rpd} (모델 {session.settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
@@ -459,7 +512,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--ai", action="store_true", help="자격요건 단계를 실제 Gemini로 실행 (가상 프로필과 샘플 공고만)")
     p.add_argument("--accept-free-tier-terms", action="store_true", help="무료 티어 입력이 제품 개선에 쓰일 수 있음에 동의")
-    p.add_argument("--gate", choices=("auto", "injected", "mock"), default="auto", help="게이트 결과를 만드는 방식")
+    p.add_argument("--gate", choices=("auto", "injected", "mock", "ai"), default="auto",
+                   help="게이트 결과를 만드는 방식. ai는 게이트의 AI 자리를 실제 Gemini로 바꾼다(--ai 필요, --draft와 함께 쓰지 않음)")
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
     p.add_argument("--select", metavar="JOB_ID", help="고른 공고를 자소서·포트폴리오 Agent에 넘길 파일(초안 형식)로 저장한다")
     p.add_argument("--draft", choices=KINDS, help="고른 공고(--select)의 자소서 또는 포트폴리오 초안을 만든다 (mock만)")
@@ -490,6 +544,11 @@ def main(argv=None):
         p.error("--task-links ai는 --ai와 함께 쓴다")
     if args.draft and args.real_profile:
         p.error("--real-profile은 구현하지 않았다")
+    # 아래 두 검사는 --draft --ai를 run_draft_ai로 보내는 분기보다 앞에 있어야 한다(거기서 build_scenario가 "ai"를 받으면 안 된다)
+    if args.gate == "ai" and not args.ai:
+        p.error("--gate ai는 --ai와 함께 쓴다 (기본은 mock이고 실제 AI는 --ai와 --accept-free-tier-terms가 있을 때만 호출한다)")
+    if args.gate == "ai" and args.draft:
+        p.error("--gate ai는 --draft와 함께 쓰지 않는다 (초안 작성은 mock 파이프라인 위에서 돈다)")
     if args.draft and args.ai:
         sys.exit(run_draft_ai(args))
     if args.ai or args.real_profile:
