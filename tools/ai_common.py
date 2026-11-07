@@ -14,6 +14,7 @@ from core.llm_client import (
     GeminiSettings,
     LLMConfigError,
     LLMQuotaExceeded,
+    MODEL_ROLES,
     UsageLog,
 )
 
@@ -83,3 +84,69 @@ def extra_cached_client(session: AiSession, args, *, results_dir: Path, cache_di
     name = f"run-{session.usage.run_id}-{cache_dir_name}" if args.fresh_cache else cache_dir_name
     return CachedClient(session.gemini, usage=session.usage, extract_dir=results_dir / "llm_cache" / name,
                         profile_dir=results_dir / "llm_cache" / "profile", cache_profile=False)
+
+
+@dataclass
+class AiRoles:
+    """JUDGE(판정 모델)와 WRITER(생성 모델) 두 역할의 준비를 마친 실행 (정책 presentation.md 1·5장). 사용량 기록은 하나(demo_run_id)다."""
+
+    judge: AiSession
+    writer: AiSession
+    usage: UsageLog
+    shared_model: bool  # 두 역할이 같은 모델이면 클라이언트(와 한도)를 함께 쓴다
+
+
+def prepare_roles(
+    args, *, notice: str, judge_calls: int, writer_calls: int, results_dir: Path, env_loader: Callable[[], dict],
+    client_cls: Callable, before_client: Callable[[], None] | None = None, usage_run_id: str | None = None,
+) -> AiRoles:
+    """안내 -> 동의 -> 역할별 설정 -> (before_client) -> **모델별** 하루 예산 점검 -> 역할별 캐시를 거치는 클라이언트.
+
+    judge_calls, writer_calls는 각 역할이 부를 **최대 시도 수**(재시도 포함)다. 두 역할이 같은 모델이면 합쳐서 그 모델의 남은 한도와 비교하고,
+    다르면 각자의 모델과 비교한다. 어느 한 모델이라도 모자라면 아무것도 호출하기 전에 AiSetupError를 낸다. 자동 fallback은 없다.
+    args에서 읽는 값: accept_free_tier_terms, model_judge/rpm_judge/rpd_judge, model_writer/rpm_writer/rpd_writer(덮어쓰기), fresh_cache, cache_profile.
+    """
+    results_dir = Path(results_dir)
+    print(notice)
+    if not args.accept_free_tier_terms:
+        raise AiSetupError("위 조건에 동의하면 --accept-free-tier-terms를 붙여 다시 실행하라. 아직 아무것도 보내지 않았다.")
+    env = env_loader()
+    for role in MODEL_ROLES:
+        for flag, key in (("model", "GEMINI_MODEL"), ("rpm", "GEMINI_RPM"), ("rpd", "GEMINI_RPD")):
+            value = getattr(args, f"{flag}_{role}", None)
+            if value is not None:
+                env[f"{key}_{role.upper()}"] = str(value)
+    try:
+        judge_settings = GeminiSettings.from_env(env, "judge")
+        writer_settings = GeminiSettings.from_env(env, "writer")
+    except LLMConfigError as e:
+        raise AiSetupError(f"실행할 수 없다: {e}") from None
+    shared = judge_settings.model == writer_settings.model
+    if shared and judge_settings != writer_settings:
+        raise AiSetupError(f"실행할 수 없다: 두 역할이 같은 모델({judge_settings.model})인데 분당·일일 한도 설정이 다르다. 한도는 모델마다 하나다")
+    if before_client:
+        before_client()
+    usage = UsageLog(results_dir / "llm_usage.jsonl", run_id=usage_run_id)
+    judge_gemini = client_cls(judge_settings, usage)
+    writer_gemini = judge_gemini if shared else client_cls(writer_settings, usage)
+
+    problems = []
+    checks = [(judge_gemini, judge_calls + (writer_calls if shared else 0))] + ([] if shared else [(writer_gemini, writer_calls)])
+    for gemini, needed in checks:  # 모델마다 한 번씩. 점검만 하므로 호출은 없다
+        try:
+            gemini.ensure_budget(needed)
+        except LLMQuotaExceeded as e:
+            problems.append(str(e))
+    if problems:
+        raise AiSetupError("시작하지 않았다: " + " / ".join(problems))
+
+    fresh = getattr(args, "fresh_cache", False)
+    cache_profile = getattr(args, "cache_profile", False)
+
+    def session(settings, gemini, cache_name):
+        directory = results_dir / "llm_cache" / (f"run-{usage.run_id}" if fresh and cache_name == "extract" else
+                                                  f"run-{usage.run_id}-{cache_name}" if fresh else cache_name)
+        client = CachedClient(gemini, usage=usage, extract_dir=directory, profile_dir=results_dir / "llm_cache" / "profile", cache_profile=cache_profile)
+        return AiSession(settings, usage, gemini, client, usage.calls_today(settings.model))
+
+    return AiRoles(session(judge_settings, judge_gemini, "extract"), session(writer_settings, writer_gemini, "writer"), usage, shared)

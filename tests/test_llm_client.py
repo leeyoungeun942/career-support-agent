@@ -287,7 +287,7 @@ def test_usage_log_has_no_prompt_or_response_content(tmp_path):
     row = json.loads(text)
     assert "프롬프트비밀" not in text and "응답비밀" not in text and SECRET not in text
     assert row["input_tokens"] == 100 and row["output_tokens"] == 20 and row["model"] == "gemini-test"
-    assert set(row) == {"ts", "date_pt", "run_id", "stage", "job_id", "model", "config", "prompt_version", "input_tokens", "output_tokens", "cached", "ok"}
+    assert set(row) == {"ts", "date_pt", "run_id", "stage", "task", "job_id", "model", "model_actual", "config", "prompt_version", "input_tokens", "output_tokens", "cached", "ok"}
 
 
 def test_usage_totals_are_counted_per_run_and_never_summed_across_runs(tmp_path):
