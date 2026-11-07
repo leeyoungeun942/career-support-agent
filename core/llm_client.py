@@ -176,11 +176,10 @@ class UsageLog:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def run_totals(self) -> dict:
-        """이 실행(run_id)의 호출 수·실패 수·캐시 적중 수·토큰. 다른 실행은 더하지 않는다."""
-        totals = {"calls": 0, "failed": 0, "cache_hits": 0, "input_tokens": 0, "output_tokens": 0}
+    def _run_rows(self, stage: str | None = None, exclude_stage: str | None = None):
+        """이 실행(run_id)의 기록 줄. stage를 주면 그 단계만, exclude_stage를 주면 그 단계를 뺀다."""
         if not self.path.exists():
-            return totals
+            return
         for line in self.path.read_text(encoding="utf-8").splitlines():
             try:
                 row = json.loads(line)
@@ -188,6 +187,17 @@ class UsageLog:
                 continue
             if row.get("run_id") != self.run_id:
                 continue
+            if (stage is not None and row.get("stage") != stage) or (exclude_stage is not None and row.get("stage") == exclude_stage):
+                continue
+            yield row
+
+    def run_totals(self, stage: str | None = None, exclude_stage: str | None = None) -> dict:
+        """이 실행(run_id)의 호출 수(시도)·실패 수·캐시 적중 수·토큰. 다른 실행은 더하지 않는다.
+
+        stage나 exclude_stage로 LLM 단계명(LLMRequest.stage)을 걸러 한 단계만, 또는 한 단계를 뺀 합계를 낼 수 있다 (data-contract 3-1).
+        """
+        totals = {"calls": 0, "failed": 0, "cache_hits": 0, "input_tokens": 0, "output_tokens": 0}
+        for row in self._run_rows(stage, exclude_stage):
             if row.get("cached"):
                 totals["cache_hits"] += 1
                 continue
@@ -196,6 +206,13 @@ class UsageLog:
             totals["input_tokens"] += row.get("input_tokens", 0)
             totals["output_tokens"] += row.get("output_tokens", 0)
         return totals
+
+    def logical_calls(self, stage: str | None = None, exclude_stage: str | None = None) -> int:
+        """이 실행의 논리 호출 수: (stage, job_id) 고유 쌍의 수. 재시도해도 하나이고 캐시 적중도 센다 (data-contract 3-1).
+
+        한도 점검에서 막혀 첫 시도 전에 멈춘 요청은 기록이 없어 세지 않는다.
+        """
+        return len({(row.get("stage"), row.get("job_id")) for row in self._run_rows(stage, exclude_stage)})
 
     def calls_today(self, model: str) -> int:
         """오늘(태평양 시간) 그 모델로 실제 보낸 호출 수. 캐시 적중은 세지 않고, 실패한 시도는 센다(한도는 시도마다 줄어든다)."""
