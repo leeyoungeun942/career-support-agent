@@ -317,3 +317,45 @@ def test_fresh_cache_gives_the_gate_and_extraction_their_own_new_directories(env
     names = sorted(p.name for p in (env.results / "llm_cache").iterdir())
     assert len(names) == 2 and names[1] == names[0] + "-gate" and names[0].startswith("run-demo-")
     assert not (env.results / "llm_cache" / "profile").exists()  # 프로필이 든 요청은 디스크에 남지 않는다
+
+
+# ---------------------------------------------------------------- 요약 화면 (AI)
+
+def test_the_ai_summary_numbers_are_the_ones_in_the_usage_log(env, monkeypatch, capsys):
+    two_models(env)
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    assert run(env) == 0
+    out = capsys.readouterr().out
+    rows = [r for r in usage_rows(env)]
+    for task, label in rp.TASKS:
+        mine = [r for r in rows if r["task"] == task]
+        attempts = sum(1 for r in mine if not r["cached"])
+        hits = sum(1 for r in mine if r["cached"])
+        logical = len({(r["stage"], r["job_id"]) for r in mine})
+        tokens_in = sum(r["input_tokens"] for r in mine if not r["cached"])
+        line = next(line for line in out.splitlines() if line.strip().startswith(f"{label}: 호출"))
+        assert f"논리 {logical}회, 시도 {attempts}회, 캐시 적중 {hits}" in line and f"입력 {tokens_in} /" in line
+    assert "모델 요청 m-judge / 실제 actual-m-judge" in out and "모델 요청 m-writer / 실제 actual-m-writer" in out
+    attempts_today = {m: sum(1 for r in rows if r["model"] == m and not r["cached"]) for m in ("m-judge", "m-writer")}
+    for model, used in attempts_today.items():
+        assert f"오늘 누적 {used}/500 (모델 {model})" in out
+
+
+def test_the_ai_summary_shows_the_sections_in_order_the_state_of_every_step_and_the_ids(env, monkeypatch, capsys):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    assert run(env) == 0
+    out = capsys.readouterr().out
+    marks = ["=== Career Support Agent Full AI Demo", "모드: AI", "[1~3]", "[4] 선택 공고: sample-3", "[5] WriterInput", "[6] 자기소개서: 완료", "[7] 포트폴리오: 완료",
+             "확인용 md:", "[8] 실행 요약", "게이트·자격요건·순위: 완료", "결과 저장·재검증: 완료", "JUDGE(판정 모델): m-base", "WRITER(생성 모델): m-base", "종료 상태: 코드 0"]
+    positions = [out.index(m) for m in marks if m != "확인용 md:"]
+    assert positions == sorted(positions) and out.count("확인용 md:") == 2
+
+
+def test_the_summary_shows_a_stage_failure_of_the_judge_model_by_name_only(env, monkeypatch, capsys):
+    Fake, log, _ = make_fake({"sample-2:": LLMStageError("SECRET-DETAIL")})
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    run(env)
+    out = capsys.readouterr().out
+    assert "게이트 AI 오류" in out and "SECRET-DETAIL" not in out and "시도" in out

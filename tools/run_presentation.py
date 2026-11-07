@@ -325,6 +325,8 @@ def render_result(result: PresentationResult, quiet: bool = False) -> list[str]:
     lines.append("")
     lines.append("[8] 실행 요약")
     lines += [f"  {_step_line(s)}" for s in result.steps.values() if s.name in ("pipeline", "persistence")]
+    if not ai:
+        lines.append("  AI 호출 없음 (mock: 정답 fixture를 돌려주는 클라이언트). 실제 Gemini로는 --ai --accept-free-tier-terms로 실행한다")
     same = ai and len(set(result.models.values())) == 1
     for role, label in (("judge", "JUDGE(판정 모델)"), ("writer", "WRITER(생성 모델)")):
         if role in result.models:

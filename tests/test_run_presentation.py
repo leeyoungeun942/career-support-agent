@@ -245,3 +245,59 @@ def test_quiet_prints_states_and_ranking_only(rdir, capsys):
     assert main("-q") == 0
     out = capsys.readouterr().out
     assert "순위: " in out and "persistence completed -" in out and "종료 코드 0" in out and "WriterInput" not in out
+
+
+# ---------------------------------------------------------------- 요약 화면 (정책 presentation.md 8장)
+
+SECTION_MARKS = ["=== Career Support Agent", "프로필: kim-haneul", "demo_run_id:", "[1~3]", "[4] 선택 공고", "[5] WriterInput", "[6] 자기소개서", "[7] 포트폴리오", "[8] 실행 요약",
+                 "이 시스템은 모든 공고에 자기소개서를 만들지 않는다"]
+
+
+def test_the_summary_sections_come_in_the_policy_order(rdir, capsys):
+    main()
+    out = capsys.readouterr().out
+    positions = [out.index(mark) for mark in SECTION_MARKS]
+    assert positions == sorted(positions)
+
+
+def test_the_mock_summary_says_that_no_ai_was_called(rdir, capsys):
+    main()
+    out = capsys.readouterr().out
+    assert "모드: mock" in out and "AI 호출 없음 (mock" in out and "오늘 누적" not in out and "JUDGE" not in out
+
+
+def test_the_safety_classification_shows_counts_and_ids_but_not_the_sentences(rdir, capsys):
+    from core.selection import select_job
+    from core.writer_input import build_writer_input
+
+    result = rp.execute(plan_for())
+    selected = select_job(result.pipeline_run, "sample-3", include_profile_evidence=True)
+    wi = build_writer_input(selected, PROFILE, ds.job_info("sample-3"))
+    text = "\n".join(rp.render_result(result))
+    section5 = text[text.index("[5] WriterInput"):text.index("[6] 자기소개서")]  # [1~3]의 사유 문구는 코드가 만든 요건 이름이라 따로 보인다
+    assert "사용 가능 사실 3개 ['F1', 'F2', 'F3'] / 확인 필요 1개 ['C1'] / 주장 금지 0개 []" in section5
+    sentences = [f.text for f in wi.usable_facts] + [c.text for c in wi.to_confirm] + [c.question for c in wi.to_confirm]
+    assert sentences and all(sentence not in section5 for sentence in sentences)  # [5]에는 사실·확인 필요 문장과 질문이 없다
+
+
+def test_a_draft_failure_shows_its_code_and_a_missing_file_shows_the_state(rdir):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_cover_letter", "sample-3"): DraftError("unsupported_token", "SECRET-DETAIL")})
+    text = "\n".join(rp.render_result(rp.execute(plan)))
+    assert "[6] 자기소개서: 실패 (unsupported_token)" in text and "코드 검증 통과" in text.split("[7]")[1] and "SECRET-DETAIL" not in text
+
+
+def test_show_drafts_adds_both_draft_bodies_after_the_summary_and_the_default_does_not(rdir, capsys):
+    main()
+    assert "=== 초안:" not in capsys.readouterr().out
+    main("--show-drafts")
+    out = capsys.readouterr().out
+    assert out.index("=== 초안: 자기소개서") > out.index("[8] 실행 요약") and "=== 초안: 포트폴리오" in out
+
+
+def test_quiet_summary_lists_every_step_and_the_exit_code(rdir, capsys):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client, {("write_portfolio", "sample-3"): LLMStageError("x")})
+    lines = rp.render_result(rp.execute(plan), quiet=True)
+    assert [line.split()[0] for line in lines[1:7]] == list(rp.STEP_NAMES)
+    assert "portfolio failed stage_failed" in lines and lines[-1] == "종료 코드 1"
