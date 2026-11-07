@@ -154,6 +154,27 @@ def test_gate_and_eligibility_must_use_the_same_model():
         RunInfo(**{**info, "gate_model_id": "m2"})
 
 
+@pytest.mark.parametrize("change", [
+    {"gate_logical_calls": 2, "gate_attempts": 0, "gate_cache_hits": 0},          # 기록이 없는데 논리 호출이 있다
+    {"gate_logical_calls": 5, "gate_attempts": 2, "gate_cache_hits": 2},
+    {"eligibility_logical_calls": 1, "eligibility_attempts": 0, "cache_hits": 0},
+    {"eligibility_logical_calls": 4, "eligibility_attempts": 2, "cache_hits": 1},
+])
+def test_logical_calls_cannot_exceed_attempts_plus_cache_hits(change):
+    with pytest.raises(ValueError, match="논리 호출마다 기록이 하나 이상"):
+        RunInfo(**{**run().run_info.model_dump(), **change})
+
+
+@pytest.mark.parametrize("change", [
+    {"gate_logical_calls": 21, "gate_attempts": 24, "gate_cache_hits": 0},        # 재시도가 있으면 시도가 더 많다
+    {"gate_logical_calls": 3, "gate_attempts": 1, "gate_cache_hits": 2},          # 캐시 적중도 논리 호출이다
+    {"gate_logical_calls": 1, "gate_attempts": 0, "gate_cache_hits": 3},          # 같은 호출의 캐시 적중이 여럿일 수 있다
+    {"eligibility_logical_calls": 0, "eligibility_attempts": 0, "cache_hits": 7},  # 이전 형식 파일: 논리 호출 칸이 없다(0)
+])
+def test_consistent_call_counts_are_accepted(change):
+    assert RunInfo(**{**run().run_info.model_dump(), **change})
+
+
 # ---------------------------------------------------------------- 변경 전 형식의 실제 파일
 
 def test_a_file_saved_before_the_gate_ai_change_still_loads_with_defaults():

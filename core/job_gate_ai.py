@@ -156,4 +156,5 @@ def make_llm_judge(client: LLMClient, posting_id: str, prompt: tuple[str, str] |
             reason = COPY_PLACEHOLDER
         return {"label": data["label"], "reason": reason}
 
+    judge.client = client  # 이 judge가 실제로 부르는 클라이언트. run_pipeline이 gate_client와 같은지 확인한다
     return judge

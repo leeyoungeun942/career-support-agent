@@ -13,13 +13,14 @@ from pipeline_helpers import IDS, NOW, PROFILE, REF, SAMPLES, Wrap, clients
 NEEDS_AI = {"job_title": "담당자 모집", "position": "담당자",
             "items": [{"text": "회사의 다양한 업무를 지원하고 필요한 일을 수행"}, {"text": "기타 관련 업무 전반"}]}
 DESIRED = "JF_SERVICE_PLANNING"
+GATE_CLIENT = FakeClient([], model="mock")  # 게이트 AI 자리가 실제로 부르는 클라이언트 역할 (run_pipeline의 gate_client와 같은 객체여야 한다)
 
 
 class Judge:
     """공고 하나의 게이트 AI 자리: 부를 때마다 기록하고, error가 있으면 던진다. 아니면 서비스기획 라벨을 돌려준다."""
 
-    def __init__(self, error=None):
-        self.error, self.calls = error, 0
+    def __init__(self, error=None, client=None):
+        self.error, self.calls, self.client = error, 0, client
 
     def __call__(self, request):
         self.calls += 1
@@ -28,18 +29,19 @@ class Judge:
         return {"label": DESIRED, "reason": "서비스 기획 업무 (테스트)"}
 
 
-def jobs_with(errors=None, ids=IDS):
-    """errors: {job_id: 예외}. 반환: (ScenarioJob 목록, {job_id: Judge})."""
-    judges = {i: Judge((errors or {}).get(i)) for i in ids}
+def jobs_with(errors=None, ids=IDS, client=None):
+    """errors: {job_id: 예외}. 반환: (ScenarioJob 목록, {job_id: Judge}). judge는 client(기본 GATE_CLIENT)로 만든 것처럼 보인다."""
+    judges = {i: Judge((errors or {}).get(i), client or GATE_CLIENT) for i in ids}
     by_id = {s["job_id"]: s for s in SAMPLES}
     return [ScenarioJob(job_id=i, posting_text=synthetic_posting(by_id[i]), gate_posting=NEEDS_AI, gate_judge=judges[i]) for i in ids], judges
 
 
 def gate_run(errors=None, *, extract=None, evidence=None, gate_client=None, ids=IDS, **kw):
-    jobs, judges = jobs_with(errors, ids)
+    client = gate_client or GATE_CLIENT
+    jobs, judges = jobs_with(errors, ids, client)
     samples = [s for s in SAMPLES if s["job_id"] in ids]
     mock_e, mock_j = clients(samples)
-    run = run_pipeline(jobs, PROFILE, REF, extract or mock_e, evidence or mock_j, desired_family=DESIRED, gate_client=gate_client or FakeClient([], model="mock"),
+    run = run_pipeline(jobs, PROFILE, REF, extract or mock_e, evidence or mock_j, desired_family=DESIRED, gate_client=client,
                        now=NOW, **kw)
     return run, judges
 
@@ -71,9 +73,9 @@ def test_every_gate_can_fail_and_the_run_still_exists_and_reloads():
 def test_gate_failed_input_invalid_and_eligibility_failure_can_share_a_run():
     mock_e, mock_j = clients()
     jobs, _ = jobs_with({"sample-2": LLMStageError("x")})
-    jobs[0] = ScenarioJob(job_id="sample-1", posting_text=jobs[0].posting_text, gate_posting={"job_title": 5, "items": []}, gate_judge=Judge())
+    jobs[0] = ScenarioJob(job_id="sample-1", posting_text=jobs[0].posting_text, gate_posting={"job_title": 5, "items": []}, gate_judge=Judge(client=GATE_CLIENT))
     r = run_pipeline(jobs, PROFILE, REF, mock_e, Wrap(mock_j, {("find_evidence", "sample-4"): LLMStageError("근거 단계 실패")}),
-                     desired_family=DESIRED, gate_client=FakeClient([], model="mock"), now=NOW)
+                     desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
     codes = {j.job_id: (j.evaluation_status, j.failure_code) for j in r.jobs}
     assert codes["sample-1"] == ("failed", "input_invalid") and codes["sample-2"] == ("failed", "gate_failed")
     assert codes["sample-4"] == ("failed", "stage_failed") and r.counts == {"completed": 3, "failed": 3, "not_run": 0}
@@ -104,9 +106,9 @@ def test_gate_stage_quota_on_the_first_job_leaves_nothing_started():
 
 def test_later_jobs_are_not_even_input_checked_after_quota():
     jobs, _ = jobs_with({"sample-1": LLMQuotaExceeded("x")})
-    jobs[1] = ScenarioJob(job_id="sample-2", posting_text=jobs[1].posting_text, gate_posting={"job_title": 5}, gate_judge=Judge())  # 입력이 틀렸어도
+    jobs[1] = ScenarioJob(job_id="sample-2", posting_text=jobs[1].posting_text, gate_posting={"job_title": 5}, gate_judge=Judge(client=GATE_CLIENT))  # 입력이 틀렸어도
     mock_e, mock_j = clients()
-    r = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="mock"), now=NOW)
+    r = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
     assert (r.jobs[1].evaluation_status, r.jobs[1].failure_code) == ("not_run", "quota_exhausted")
 
 
@@ -131,7 +133,7 @@ def test_defects_in_the_gate_judge_still_propagate_with_a_gate_client(error):
     jobs, _ = jobs_with({"sample-2": error})
     mock_e, mock_j = clients()
     with pytest.raises(type(error)):
-        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="mock"), now=NOW)
+        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
 
 
 def test_config_and_permission_errors_from_the_gate_are_not_swallowed():
@@ -141,13 +143,13 @@ def test_config_and_permission_errors_from_the_gate_are_not_swallowed():
         jobs, _ = jobs_with({"sample-1": error})
         mock_e, mock_j = clients()
         with pytest.raises(type(error)):
-            run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="mock"), now=NOW)
+            run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
 
 
 # ---------------------------------------------------------------- 실행 조건 기록: 모델, 프롬프트, 사용량
 
 def test_gate_ai_run_records_gate_model_prompt_and_mode():
-    r, _ = gate_run(gate_client=FakeClient([], model="mock"))
+    r, _ = gate_run(gate_client=GATE_CLIENT)
     info = r.run_info
     assert (info.gate_mode, info.gate_model_id, info.gate_prompt_version) == ("ai", "mock", load_prompt("gate_label")[0])
     assert info.eligibility_mode == "mock" and info.model_id is None
@@ -156,11 +158,14 @@ def test_gate_ai_run_records_gate_model_prompt_and_mode():
 def test_same_model_is_required_for_both_stages():
     mock_e, mock_j = clients()
     mock_e.model = mock_j.model = "m-1"
-    jobs, judges = jobs_with()
+    other = FakeClient([], model="m-2")
+    jobs, judges = jobs_with(client=other)
     with pytest.raises(ValueError, match="모델이 다르다"):
-        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="m-2"), now=NOW)
+        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=other, now=NOW)
     assert all(judge.calls == 0 for judge in judges.values())  # 게이트를 돌리기 전에 거부한다(호출을 쓰지 않는다)
-    ok = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=FakeClient([], model="m-1"), now=NOW)
+    same = FakeClient([], model="m-1")
+    jobs, _ = jobs_with(client=same)
+    ok = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=same, now=NOW)
     assert (ok.run_info.model_id, ok.run_info.gate_model_id) == ("m-1", "m-1")
 
 
@@ -169,16 +174,16 @@ def test_gate_client_cannot_be_combined_with_injected_gates():
 
     mock_e, mock_j = clients()
     with pytest.raises(ValueError, match="gate_client"):
-        run_pipeline(scenario(), PROFILE, REF, mock_e, mock_j, gate_client=FakeClient([], model="mock"), now=NOW)
+        run_pipeline(scenario(), PROFILE, REF, mock_e, mock_j, gate_client=GATE_CLIENT, now=NOW)
 
 
 def test_fingerprint_changes_with_the_gate_model_but_not_for_runs_without_a_gate_client():
-    a, _ = gate_run(gate_client=FakeClient([], model="mock"))
+    a, _ = gate_run(gate_client=GATE_CLIENT)
     mock_e, mock_j = clients()
     jobs, _ = jobs_with()
     plain = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_judge=Judge(), now=NOW)
     assert plain.run_info.gate_mode == "mock" and plain.input_fingerprint != a.input_fingerprint
-    again, _ = gate_run(gate_client=FakeClient([], model="mock"))
+    again, _ = gate_run(gate_client=GATE_CLIENT)
     assert again.input_fingerprint == a.input_fingerprint
 
 
@@ -214,3 +219,38 @@ def test_mock_gate_without_a_gate_client_is_unchanged():
                         gate_judge=make_label_mock([DESIRED, DESIRED])) for s in SAMPLES]
     r = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, now=NOW)
     assert r.run_info.gate_mode == "mock" and r.run_info.gate_model_id is None and r.counts["completed"] == 6
+
+
+# ---------------------------------------------------------------- gate_client는 실제 호출 클라이언트다
+
+def test_make_llm_judge_exposes_the_client_it_calls():
+    from core.job_gate_ai import make_llm_judge
+
+    client = FakeClient([], model="mock")
+    assert make_llm_judge(client, "sample-1").client is client
+
+
+def test_a_gate_judge_built_on_another_client_is_refused_before_any_call():
+    other = FakeClient([], model="mock")
+    jobs, judges = jobs_with(client=other)  # 사용량·모델은 GATE_CLIENT 기준으로 기록될 텐데 실제 호출은 other로 간다
+    mock_e, mock_j = clients()
+    with pytest.raises(ValueError, match="gate_client로 만들어지지 않았다"):
+        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
+    assert all(judge.calls == 0 for judge in judges.values())
+
+
+def test_a_plain_callable_gate_judge_is_refused_when_a_gate_client_is_given():
+    mock_e, mock_j = clients()
+    jobs = [ScenarioJob(job_id="sample-1", posting_text=synthetic_posting(SAMPLES[0]), gate_posting=NEEDS_AI, gate_judge=make_label_mock([DESIRED, DESIRED]))]
+    with pytest.raises(ValueError, match="gate_client로 만들어지지 않았다"):
+        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_client=GATE_CLIENT, now=NOW)
+
+
+def test_the_shared_gate_judge_is_checked_too():
+    mock_e, mock_j = clients()
+    jobs = [ScenarioJob(job_id="sample-1", posting_text=synthetic_posting(SAMPLES[0]), gate_posting=NEEDS_AI)]
+    with pytest.raises(ValueError, match="gate_client로 만들어지지 않았다"):
+        run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_judge=Judge(client=FakeClient([], model="mock")),
+                     gate_client=GATE_CLIENT, now=NOW)
+    ok = run_pipeline(jobs, PROFILE, REF, mock_e, mock_j, desired_family=DESIRED, gate_judge=Judge(client=GATE_CLIENT), gate_client=GATE_CLIENT, now=NOW)
+    assert ok.run_info.gate_mode == "ai"

@@ -110,7 +110,8 @@ def run_pipeline(
 
     - 모든 입력 공고가 결과에 남는다. 공고 하나가 실패하면 그 공고만 failed로 두고 이어간다. 호출 한도가 소진되면 그 공고는
       failed, 뒤 공고는 not_run으로 두고 멈춘다. 정렬은 completed인 공고만 한다 (D6).
-    - 게이트 AI(gate_client를 주면 gate_mode=ai, 모델과 사용량을 기록한다. 공고별 gate_judge는 호출하는 쪽이 그 클라이언트로 만들어 넘긴다): 판정 호출의
+    - 게이트 AI(gate_client를 주면 gate_mode=ai, 모델과 사용량을 기록한다. gate_client는 기록용이 아니라 실제 호출 클라이언트이고, 공고별 gate_judge는
+      make_llm_judge(gate_client, ...)로 만든 것이어야 한다(judge.client가 gate_client가 아니면 실행 거부 ValueError)): 판정 호출의
       LLMStageError는 그 공고의 gate_failed, LLMQuotaExceeded는 그 공고의 quota_exhausted다. 게이트는 공고 전체를 먼저 훑으므로 한도가 소진되면
       남은 공고의 게이트도 자격요건도 시작하지 않는다(앞 공고는 게이트 결과를 남기고 not_run). 판정 함수의 결함(TypeError 등)은 숨기지 않고 그대로 올린다 (data-contract 3-3).
     - 입력 자체가 틀린 것(같은 job_id, 주입한 게이트의 job_id 불일치, 게이트 실행에 필요한 인자 없음, 두 클라이언트의 모델 불일치)은
@@ -135,6 +136,9 @@ def run_pipeline(
     if gate_client is not None:
         if all(injected):
             raise ValueError("주입한 게이트 결과와 gate_client(게이트 AI)를 함께 쓸 수 없다")
+        for job in jobs:  # gate_client는 기록용이 아니라 실제 호출 클라이언트다: 모델·사용량 기록이 실제 호출과 어긋나지 않게 한다
+            if getattr(job.gate_judge or gate_judge, "client", None) is not gate_client:
+                raise ValueError(f"공고 {job.job_id}: 게이트 judge가 gate_client로 만들어지지 않았다 (core.job_gate_ai.make_llm_judge(gate_client, ...)로 만든다)")
         if evidence_client.model != "mock" and gate_client.model != evidence_client.model:
             raise ValueError(f"게이트({gate_client.model})와 자격요건({evidence_client.model})의 모델이 다르다: 두 단계는 같은 모델의 한도를 나눠 쓴다")
 

@@ -171,6 +171,23 @@ def test_full_run_uses_the_ai_for_both_stages_and_records_the_run(gate_env, ai_p
     assert (info.eligibility_attempts, info.eligibility_logical_calls) == (12, 12) and info.input_tokens == 7 * 12  # 기존 칸은 자격요건 단계만
     assert "게이트 호출: 논리" in cap.out and "자격요건 호출: 논리 12회" in cap.out and f"시도 합계 {len(gate_calls) + 12}회" in cap.out
     assert "경고: 실제 호출이" not in cap.out
+    # RunInfo의 모든 호출 칸을 사용량 기록(llm_usage.jsonl)에서 다시 센 값과 맞춰 본다. 단계 합계는 실행 전체 합계가 된다
+    from core.llm_client import UsageLog
+
+    log = results / "llm_usage.jsonl"
+    usage = UsageLog(log, run_id=json.loads(log.read_text(encoding="utf-8").splitlines()[0])["run_id"])
+    gate, rest, whole = usage.run_totals(stage=GATE_STAGE), usage.run_totals(exclude_stage=GATE_STAGE), usage.run_totals()
+    assert (info.gate_attempts, info.gate_cache_hits, info.gate_input_tokens, info.gate_output_tokens) == (
+        gate["calls"], gate["cache_hits"], gate["input_tokens"], gate["output_tokens"])
+    assert info.gate_logical_calls == usage.logical_calls(stage=GATE_STAGE)
+    assert (info.eligibility_attempts, info.cache_hits, info.input_tokens, info.output_tokens) == (
+        rest["calls"], rest["cache_hits"], rest["input_tokens"], rest["output_tokens"])
+    assert info.eligibility_logical_calls == usage.logical_calls(exclude_stage=GATE_STAGE)
+    assert info.gate_attempts + info.eligibility_attempts == whole["calls"]
+    assert info.gate_cache_hits + info.cache_hits == whole["cache_hits"]
+    assert info.gate_input_tokens + info.input_tokens == whole["input_tokens"] and info.gate_output_tokens + info.output_tokens == whole["output_tokens"]
+    assert info.gate_logical_calls + info.eligibility_logical_calls == usage.logical_calls()
+    assert demo.load_run(saved_runs(results)[0]).run_info == info  # 저장 파일을 다시 읽어도 같은 값이다
     assert (results / "llm_cache" / "gate").is_dir() and len(list((results / "llm_cache" / "extract").glob("*.json"))) == 6  # 캐시 디렉터리가 따로다
     assert not (results / "llm_cache" / "profile").exists()
 

@@ -78,6 +78,12 @@ class RunInfo(BaseModel):
             raise ValueError("gate_model_id와 gate_prompt_version은 gate_mode=ai일 때만, 그리고 반드시 있어야 한다")
         if gate_ai and self.model_id is not None and self.gate_model_id != self.model_id:
             raise ValueError("게이트와 자격요건의 모델이 다르다: 두 단계는 같은 모델의 한도를 나눠 쓴다")
+        # 논리 호출은 (stage, job_id) 고유 쌍이고 쌍마다 기록 줄이 하나 이상(시도 또는 캐시 적중) 있다 (data-contract 3-1).
+        # 아래 관계만 검사한다: 이전 형식 파일은 논리 호출 칸이 0이라 통과한다. 같은 쌍의 캐시 적중이 여럿일 수 있어 logical >= cache_hits는 요구하지 않는다
+        for name, logical, attempts, hits in (("gate", self.gate_logical_calls, self.gate_attempts, self.gate_cache_hits),
+                                              ("eligibility", self.eligibility_logical_calls, self.eligibility_attempts, self.cache_hits)):
+            if logical > attempts + hits:
+                raise ValueError(f"{name}_logical_calls({logical})가 시도 + 캐시 적중({attempts + hits})보다 크다: 논리 호출마다 기록이 하나 이상 있다")
         return self
 
 
