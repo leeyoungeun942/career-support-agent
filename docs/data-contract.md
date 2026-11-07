@@ -497,7 +497,7 @@
 |---|---|---|
 | `schema_version` | `"pipeline_run.v1"` | |
 | `run_id` | 문자열 | UTC 시각 + 무작위 접미사. 예: `20261104T061500Z-a3f9c1`. 같은 ID의 파일이 있으면 덮어쓰지 않고 접미사를 다시 뽑는다. mock 실행과 AI 실행은 서로 다른 `run_id`다 |
-| `input_fingerprint` | 문자열 | 재현 확인용 단방향 해시. 입력은 공고 `job_id` 목록, 모델 ID, 프롬프트 버전, 생성 설정 식별자뿐이다. **프로필 원문·공고 원문은 넣지 않는다** |
+| `input_fingerprint` | 문자열 | 재현 확인용 단방향 해시. 입력은 공고 `job_id` 목록, 모델 ID, 프롬프트 버전(`gate_mode=ai`이면 게이트 모델 ID·프롬프트 버전 포함), 생성 설정 식별자뿐이다. **프로필 원문·공고 원문은 넣지 않는다** |
 | `created_at` | UTC 시각 | |
 | `as_of_month` | `YYYY-MM` | 기간 계산 기준 월 (정책 11장) |
 | `profile` | `{profile_id, is_synthetic}` | 어떤 프로필인지와 가상 프로필 여부. 프로필 내용은 넣지 않는다 |
@@ -511,13 +511,26 @@
 
 | 칸 | 값 | 설명 |
 |---|---|---|
-| `gate_mode` | `injected` / `mock` | `injected`: 기대 게이트 결과를 넣음(테스트), `mock`: 규칙 + mock AI 자리. 실제 AI는 이슈 #12에서 추가한다 |
+| `gate_mode` | `injected` / `mock` / `ai` | `injected`: 기대 게이트 결과를 넣음(테스트), `mock`: 규칙 + mock AI 자리, `ai`: 규칙 + 실제 AI 자리(`core/job_gate_ai.py`, 이슈 #16). `ai`는 `tools.run_demo --gate ai --ai`로만 만든다 |
 | `eligibility_mode` | `mock` / `ai` | |
-| `model_id` | 문자열 또는 `null` | `ai`일 때 정확한 모델 ID |
+| `model_id` | 문자열 또는 `null` | `eligibility_mode=ai`일 때 정확한 모델 ID. 게이트 쪽은 `gate_model_id` |
 | `prompt_versions` | `{extract_requirements, find_evidence}` | 프롬프트 파일 맨 위의 `version` |
 | `generation_config` | 문자열 또는 `null` | 생성 설정 식별자 (`GeminiClient.config_id`) |
 | `cache_mode` | `memory` / `disk` / `fresh` | `memory`: 기본(공고 추출은 공용 디스크 캐시, 프로필이 든 근거 찾기는 메모리). `disk`: `--cache-profile`로 근거 찾기 결과도 디스크에 둠. `fresh`: `--fresh-cache`로 이번 실행만의 새 공고 추출 캐시를 씀 (정책 18장 모델 비교 조건) |
-| `cache_hits`, `input_tokens`, `output_tokens` | 정수 | 사용량 기록의 이번 실행 합계. 프롬프트·응답 내용은 넣지 않는다 |
+| `cache_hits`, `input_tokens`, `output_tokens` | 정수 | 사용량 기록의 이번 실행 합계 중 **자격요건 단계**(LLM 단계명이 `gate_label`이 아닌 기록)만. 게이트 AI가 없던 실행은 `gate_label` 기록이 없어 실행 전체 합계와 같다. 프롬프트·응답 내용은 넣지 않는다 |
+| `eligibility_logical_calls`, `eligibility_attempts` | 정수 (기본 0) | 자격요건 단계의 논리 호출 수와 시도 수 (아래 정의) |
+| `gate_model_id` | 문자열 또는 `null` | `gate_mode=ai`일 때 필수, 아니면 `null`. **자격요건 단계의 `model_id`와 같아야 한다**: 두 단계가 같은 키·같은 모델의 일일 한도를 나눠 쓰고, 시작 전 호출 예산 점검이 그 모델 하나로 두 단계의 최대 시도 수를 합쳐 비교하기 때문이다. 자격요건이 `mock`이면 비교하지 않는다 |
+| `gate_prompt_version` | 문자열 또는 `null` | `gate_mode=ai`일 때 필수. 게이트 프롬프트 파일(`prompts/gate_label.md`) 맨 위의 `version` |
+| `gate_logical_calls`, `gate_attempts`, `gate_cache_hits` | 정수 (기본 0) | 게이트 단계(LLM 단계명 `gate_label`)의 논리 호출 수, 시도 수, 캐시 적중 수 |
+| `gate_input_tokens`, `gate_output_tokens` | 정수 (기본 0) | 게이트 단계의 토큰 합계 |
+
+**호출 수의 정의.** 사용량 기록은 시도마다 한 줄이고 `stage`와 `job_id`를 남긴다. 한 요청의 재시도는 같은 `job_id`를 쓰므로(게이트는 `공고:item:i:subtask:j`) 새 식별자 없이 센다.
+
+- **논리 호출 수** = 이번 실행 기록의 `(stage, job_id)` 고유 쌍의 수. 재시도해도 하나이고 캐시 적중도 센다.
+- **시도 수** = 캐시 적중이 아닌 기록의 수. 재시도와 실패한 시도를 포함한다. 일일 한도는 시도마다 줄어든다.
+- **캐시 적중 수** = 캐시 적중 기록의 수.
+- 한도 점검에서 막혀 첫 시도 전에 멈춘 요청은 기록이 없어 세지 않는다. 서버에 보내지 않았으니 한도도 쓰지 않았다.
+- 모든 값은 개수이고 공고 원문·프롬프트·모델 출력·이유는 저장하지 않는다 (정책 16장).
 
 ### 3-2. 공고별 항목 `jobs[]`
 
@@ -529,7 +542,7 @@
 | `failure_code` | 3-3의 코드 또는 `null` | `completed`이면 `null`, 아니면 반드시 있다 |
 | `included_in_ranking` | `true` / `false` | **계산값.** `evaluation_status=completed`일 때만 `true` |
 | `rank` | 1부터의 정수 또는 `null` | **계산값.** `ranking`에서의 위치. 정렬에 들어가지 않으면 `null` |
-| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 입력이 틀려 `input_invalid`이면 `null`. **`detail`은 비운다**: `detail.items`에 공고 업무 항목 원문이 들어 있어 "공고 원문은 저장하지 않는다"(3-4)와 맞지 않는다. 게이트를 실행했든 결과를 주입했든 같고, `detail`이 있는 결과 파일은 읽을 때 오류다 |
+| `gate` | `job_gate_result.v2` 또는 `null` | 평가 상태와 무관하게 있는 대로 남긴다. 게이트 결과를 만들지 못했으면 `null`: 입력이 틀려 `input_invalid`, 게이트 AI 호출 실패 `gate_failed`, 게이트 단계에서 한도가 소진된 `quota_exhausted`(3-3). **`detail`은 비운다**: `detail.items`에 공고 업무 항목 원문이 들어 있어 "공고 원문은 저장하지 않는다"(3-4)와 맞지 않는다. 게이트를 실행했든 결과를 주입했든 같고, `detail`이 있는 결과 파일은 읽을 때 오류다 |
 | `eligibility` | `eligibility_result.v1` 또는 `null` | `completed`일 때만 있다 |
 | `reference_only` | `true` / `false` / `null` | **계산값.** `eligibility.reference_only`. 화면에 "참고용 평가"를 붙인다. `eligibility`가 없으면 `null` |
 | `summary` | 문자열 | **계산값.** `completed`이면 `eligibility.summary` (2-7, 코드가 만든 템플릿). 아니면 3-3의 화면 문구. LLM이 쓰지 않는다 |
@@ -549,12 +562,18 @@
 | `stage_failed` | `failed` | 요건 추출·근거 찾기의 통신 또는 스키마 위반 | 평가 실패: AI 단계 오류 |
 | `evidence_check_failed` | `failed` | 프로필 근거 검증 실패 | 평가 실패: 프로필 근거 검증 |
 | `assembly_failed` | `failed` | 결과 조립 실패 | 평가 실패: 결과 조립 |
+| `gate_failed` | `failed` | 게이트 AI 호출의 통신 또는 응답 계약 위반(허용 라벨 밖, 형식 오류 등)으로 이 공고의 게이트 결과를 만들지 못함 (이슈 #16) | 평가 실패: 게이트 AI 오류 |
 | `input_invalid` | `failed` | 이 공고의 입력이 없거나 어긋남 | 평가 실패: 공고 입력 오류 |
 | `quota_exhausted` | `failed`(한도에 닿은 공고) 또는 `not_run`(뒤 공고) | 호출 한도 소진 | 평가 중단: 호출 한도 소진 / 평가 안 함: 호출 한도 소진 |
 
 - 오류 메시지의 원문(모델 출력, 프로필 인용, 예외 내용)은 어디에도 옮기지 않는다. 범주 이름만 쓴다.
 - **실행 자체를 시작하지 않는 경우**(입력 파일이 없음, 6건 대응이 어긋남, 하루 호출 예산 부족)는 공고별 상태가 아니고 결과 파일도 만들지 않는다.
 - 한도 소진(`LLMQuotaExceeded`)이 나면 그 공고는 `failed`, 그 뒤 공고는 `not_run`이고 앞 공고의 결과는 그대로 남는다. `not_run`만 이어서 다시 돌리는 기능은 이 버전에 없다.
+- **`gate`가 없는 공고.** `gate`는 `failure_code`가 `input_invalid`, `gate_failed`, `quota_exhausted`일 때만 없을 수 있고, 그때 `eligibility`도 없다(자격요건 단계를 시작하지 않는다). `gate_failed`이면 `gate`는 반드시 없다(결과를 만들지 못했다는 뜻이므로). 그 밖의 코드(`stage_failed`, `evidence_check_failed`, `assembly_failed`)와 `completed`는 `gate`가 반드시 있다.
+- **게이트 AI 호출 실패(`gate_failed`).** 그 공고만 `failed`로 남기고 다음 공고의 게이트를 이어 간다. 게이트가 없는 공고는 `ranking_group`을 알 수 없으므로 임의 그룹에 넣지 않고 정렬에서 뺀다(`ranking`에 없고 "평가하지 못한 공고"로 보인다). 게이트 판정 함수 자체의 결함(`TypeError`, `KeyError` 등)은 공고별 실패로 바꾸지 않고 실행 오류로 올린다.
+- **한도 소진이 어느 단계에서 났는지는 `gate`의 유무로 구분한다.** 아래 두 경우는 한 실행에 함께 있을 수 없다.
+  - **자격요건 단계에서 소진:** 소진된 공고(`failed`)와 뒤 공고(`not_run`) 모두 `gate`가 있다. 앞 공고에는 `completed`가 있을 수 있다.
+  - **게이트 단계에서 소진:** 게이트는 공고 전체를 먼저 훑으므로, 소진되면 **남은 공고의 게이트도 시작하지 않는다.** 소진된 공고는 `failed`이고 `gate`가 없다. 뒤 공고는 `not_run`이고 `gate`가 없다. 앞 공고(게이트는 끝남)는 `gate`를 그대로 남기고 `not_run`이다. 이때는 자격요건 단계를 아무도 시작하지 않았으므로 `completed` 공고가 없다. 값끼리의 관계로 검사한다: `gate`가 없는 `quota_exhausted` 공고가 있으면 `completed` 공고가 없고, 입력 순서에서 그 앞은 `gate`가 있는 `not_run`, 뒤는 `gate`가 없는 `not_run`이다.
 
 ### 3-4. 저장 범위
 
@@ -628,6 +647,20 @@ write_application(writer_input, client, kind) -> ApplicationDraft   (agents/appl
 ### `pipeline_run.v1`, `selected_job.v1` 신설 (2026-11-04, 이슈 #7)
 
 새 형식이라 이전할 것이 없다. 3장은 `core/pipeline.py`와 `tools/run_demo.py`를, 4장은 `select_job`이 쓴다. 4장은 자소서·포트폴리오 생성 이슈에서 확장할 내부 초안이다.
+
+### `pipeline_run.v1` 호환 확장 (2026-11-07, 이슈 #16)
+
+버전은 `pipeline_run.v1`을 유지한다. 허용 값을 늘리고 칸을 더하는 방향이고 새 칸은 모두 기본값이 있다.
+
+| 바뀐 것 | 내용 |
+|---|---|
+| `failure_code` | `gate_failed` 추가 (3-3) |
+| `gate` | `input_invalid`뿐 아니라 `gate_failed`, `quota_exhausted`일 때도 `null` 허용 (3-2, 3-3) |
+| `run_info.gate_mode` | `ai` 추가 |
+| `run_info` 칸 | `gate_model_id`, `gate_prompt_version`, `gate_logical_calls`, `gate_attempts`, `gate_cache_hits`, `gate_input_tokens`, `gate_output_tokens`, `eligibility_logical_calls`, `eligibility_attempts` 추가 |
+| `cache_hits`, `input_tokens`, `output_tokens` | 뜻이 "실행 전체"에서 "자격요건 단계"로 좁아짐. 게이트 AI가 없던 실행은 값이 그대로다 |
+
+**이전 방법:** 이전 파일은 고칠 것 없이 읽힌다(새 칸은 기본값, `gate_mode`는 `injected`/`mock`). 새 파일(`gate_mode=ai` 또는 `gate_failed` 공고가 있는 파일)은 이전 코드로 읽을 수 없다. 변경 전 형식의 실제 파일을 `tests/fixtures/pipeline_run_v1_before_gate_ai.json`에 두고 테스트가 읽는다.
 
 ### `job_gate_result.v1` → `v2` (2026-11-02)
 
