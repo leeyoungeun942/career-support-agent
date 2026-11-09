@@ -171,6 +171,11 @@ def _persist(plan: Plan, run: PipelineRun, result: PresentationResult) -> Pipeli
     return run.model_copy(update={"run_id": saved.run_id})
 
 
+def _done(progress, label: str, step: Step) -> None:
+    """단계가 끝났음을 한 줄로 알린다 (정책 presentation.md 8장 진행 줄). 상태와 코드만 낸다."""
+    progress(f"{label}: {_step_line(step).split(': ', 1)[1]}")
+
+
 def _write_draft(plan: Plan, wi, kind: str, result: PresentationResult) -> bool:
     """초안 1건을 만든다. 한도 소진이면 True(남은 Writer 단계를 시작하지 않는다)를 돌려준다. 다른 실패는 이 초안만 failed로 남긴다."""
     step = result.steps[kind]
@@ -223,17 +228,25 @@ def _exit_code(result: PresentationResult) -> int:
     return EXIT_FAILED if failed else EXIT_OK
 
 
-def execute(plan: Plan) -> PresentationResult:
-    """발표 흐름 전체(정책 presentation.md 3장)를 실행한다. 단계 실패는 상태로 남기고, 코드 결함(TypeError 등)이나 설정 오류는 그대로 올린다."""
+def execute(plan: Plan, progress=None) -> PresentationResult:
+    """발표 흐름 전체(정책 presentation.md 3장)를 실행한다. 단계 실패는 상태로 남기고, 코드 결함(TypeError 등)이나 설정 오류는 그대로 올린다.
+
+    progress(line)가 있으면 단계가 시작하고 끝날 때마다 한 줄씩 부른다 (정책 8장).
+    """
+    progress = progress or (lambda line: None)
     result = PresentationResult(plan.mode, plan.demo_run_id, {n: Step(n) for n in STEP_NAMES})
     steps = result.steps
 
+    wait = " (수 분 걸릴 수 있음)" if plan.external else ""
+    progress(f"[1~3] 직무 게이트·자격요건·순위: 시작, 공고 {len(plan.jobs)}건{wait}")
     run = run_pipeline(plan.jobs, plan.profile, PROFILE_REF, plan.extract_client, plan.evidence_client, desired_family=plan.desired_family,
                        gate_client=plan.gate_client, allow_external_profile=plan.external, usage=plan.usage, cache_mode=plan.cache_mode)
     steps["pipeline"].status = "completed"
     result.pipeline_run = run
+    progress(f"[1~3] 직무 게이트·자격요건·순위: 완료 (완료 {run.counts['completed']}, 실패 {run.counts['failed']}, 안 함 {run.counts['not_run']})")
 
     original = _persist(plan, run, result)
+    _done(progress, "[저장] 결과 저장·재검증", steps["persistence"])
     if original is None:  # 저장·재로딩 검증이 선행 조건이다: Writer를 한 번도 부르지 않고 멈춘다
         result.pipeline_run = run
     else:
@@ -243,20 +256,26 @@ def execute(plan: Plan) -> PresentationResult:
         except SelectionRefused:  # 다른 공고로 바꾸지 않는다
             job = next((j for j in original.jobs if j.job_id == PRESENTATION_JOB_ID), None)
             _fail(steps["selection"], (job.failure_code or job.evaluation_status) if job else "no_such_job")
+            _done(progress, "[4] 공고 선택", steps["selection"])
         else:
             steps["selection"].status = "completed"
+            progress(f"[4] 공고 선택: 완료 ({PRESENTATION_JOB_ID})")
             try:
                 info = job_info(PRESENTATION_JOB_ID, plan.gate_cases)
                 links = _task_links(plan, selected, info)
                 wi = build_writer_input(selected, plan.profile, info, task_links=links)
             except LLMQuotaExceeded:
                 _fail(steps["writer_input"], "quota_exhausted")
+                progress("[5] WriterInput: 실패 (quota_exhausted)")
             except LLMStageError:
                 _fail(steps["writer_input"], "task_links_failed")
+                progress("[5] WriterInput: 실패 (task_links_failed)")
             except WriterInputError:
                 _fail(steps["writer_input"], "writer_input_failed")
+                progress(f"[5] WriterInput: 실패 ({steps['writer_input'].code})")
             else:
                 steps["writer_input"].status = "completed"
+                progress("[5] WriterInput 안전 분류: 완료")
                 result.fact_counts = {"usable_facts": len(wi.usable_facts), "to_confirm": len(wi.to_confirm), "do_not_claim": len(wi.do_not_claim)}
                 result.fact_ids = {"usable_facts": [f.fact_id for f in wi.usable_facts], "to_confirm": [c.confirm_id for c in wi.to_confirm],
                                    "do_not_claim": [x.forbidden_id for x in wi.do_not_claim]}
@@ -264,7 +283,9 @@ def execute(plan: Plan) -> PresentationResult:
                 for kind in KINDS:  # 서로 독립: 한쪽 실패가 다른 쪽을 건너뛰게 하지 않는다 (한도 소진만 예외)
                     if stop:
                         continue
+                    progress(f"[{6 + KINDS.index(kind)}] {STEP_TEXT[kind]}: 시작{wait}")
                     stop = _write_draft(plan, wi, kind, result)
+                    _done(progress, f"[{6 + KINDS.index(kind)}] {STEP_TEXT[kind]}", result.steps[kind])
     _usage_summary(plan, result)
     result.exit_code = _exit_code(result)
     return result
@@ -407,7 +428,9 @@ def main(argv=None):
     except (ScenarioError, FileNotFoundError) as e:
         print(f"실행할 수 없다: {e}", file=sys.stderr)
         sys.exit(EXIT_REFUSED)
-    result = execute(plan)
+    result = execute(plan, None if args.quiet else lambda line: print(line, flush=True))
+    if not args.quiet:
+        print()
     print("\n".join(render_result(result, args.quiet)))
     if args.show_drafts:
         print("\n".join(render_drafts(result)))

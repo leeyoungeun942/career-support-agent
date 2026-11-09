@@ -256,6 +256,7 @@ SECTION_MARKS = ["=== Career Support Agent", "프로필: kim-haneul", "demo_run_
 def test_the_summary_sections_come_in_the_policy_order(rdir, capsys):
     main()
     out = capsys.readouterr().out
+    out = out[out.index("=== Career Support Agent"):]  # 앞의 진행 줄(정책 8장)은 요약이 아니다
     positions = [out.index(mark) for mark in SECTION_MARKS]
     assert positions == sorted(positions)
 
@@ -328,3 +329,25 @@ def test_a_defect_in_a_judge_stage_is_not_hidden_as_a_selection_failure(rdir):
     plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-3"): TypeError("판정 코드의 결함")})
     with pytest.raises(TypeError):
         rp.execute(plan)
+
+
+def test_progress_lines_come_one_per_stage_start_and_end_without_changing_the_result():
+    lines = []
+    plan = rp.build_mock_plan(rp.build_parser().parse_args([]))
+    with_progress = rp.execute(plan, lines.append)
+    plain = rp.execute(rp.build_mock_plan(rp.build_parser().parse_args([])))
+    assert [l.split(":")[0] for l in lines] == ["[1~3] 직무 게이트·자격요건·순위", "[1~3] 직무 게이트·자격요건·순위", "[저장] 결과 저장·재검증", "[4] 공고 선택",
+                                                "[5] WriterInput 안전 분류", "[6] 자기소개서", "[6] 자기소개서", "[7] 포트폴리오", "[7] 포트폴리오"]
+    assert lines[0].endswith("공고 6건") and "수 분" not in lines[0]  # mock은 기다리지 않는다
+    assert {n: s.status for n, s in with_progress.steps.items()} == {n: s.status for n, s in plain.steps.items()}
+    assert with_progress.exit_code == plain.exit_code == 0
+
+
+def test_main_prints_progress_before_the_summary_and_not_in_quiet_mode(capsys):
+    with pytest.raises(SystemExit):
+        rp.main([])
+    out = capsys.readouterr().out
+    assert out.index("[6] 자기소개서: 시작") < out.index("=== Career Support Agent")
+    with pytest.raises(SystemExit):
+        rp.main(["-q"])
+    assert "시작" not in capsys.readouterr().out

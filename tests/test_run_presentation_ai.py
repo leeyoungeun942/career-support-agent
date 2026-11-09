@@ -347,6 +347,7 @@ def test_the_ai_summary_shows_the_sections_in_order_the_state_of_every_step_and_
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 0
     out = capsys.readouterr().out
+    out = out[out.index("=== Career Support Agent"):]  # 앞의 진행 줄(정책 8장)은 요약이 아니다
     marks = ["=== Career Support Agent Full AI Demo", "모드: AI", "[1~3]", "[4] 선택 공고: sample-3", "[5] WriterInput", "[6] 자기소개서: 완료", "[7] 포트폴리오: 완료",
              "확인용 md:", "[8] 실행 요약", "게이트·자격요건·순위: 완료", "결과 저장·재검증: 완료", "JUDGE(판정 모델): m-base", "WRITER(생성 모델): m-base", "종료 상태: 코드 0"]
     positions = [out.index(m) for m in marks if m != "확인용 md:"]
