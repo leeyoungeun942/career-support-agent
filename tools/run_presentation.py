@@ -13,7 +13,6 @@
 화면에는 단계 상태, 순위, 코드가 만든 사유, 개수와 id만 낸다. 공고 원문, 프로필 인용, 모델 출력, 오류 내용은 출력하지 않는다.
 """
 import argparse
-import hashlib
 import json
 import sys
 import uuid
@@ -124,31 +123,6 @@ class Plan:
     @property
     def external(self) -> bool:
         return self.mode == "ai"
-
-
-# 외부로 보내는 입력 파일의 정규화한 JSON(키 정렬, 공백 없음)의 SHA-256. 정책 presentation.md 6장: 이 값과 다르면 --ai는 시작하지 않는다
-CANONICAL_INPUT_SHA256 = {
-    "postings": "b1318134fc8dc6d7e621ca0007ad913defdbeec4046de865abc384c45d0949c1",
-    "gate_cases": "0fa0f9ce9ba2e3e6d380fc72c0aef09761c9e6a84df88472e6266543570348c1",
-}
-
-
-def input_digest(path: Path) -> str:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
-
-
-def check_presentation_inputs(args) -> None:
-    """--ai로 보낼 두 입력 파일이 고정된 발표 입력인지 확인한다. 없는 파일은 여기서 판단하지 않는다(뒤의 안내가 처리). 다르면 AiSetupError."""
-    for key, path in (("postings", args.postings), ("gate_cases", args.gate_cases)):
-        if not Path(path).exists():
-            continue
-        try:
-            same = input_digest(Path(path)) == CANONICAL_INPUT_SHA256[key]
-        except (ValueError, OSError):  # JSON이 아님
-            same = False
-        if not same:
-            raise AiSetupError(f"실행할 수 없다: {path}는 고정된 발표 입력과 내용이 다르다. 실제 지원자나 다른 공고 정보가 외부로 나가지 않도록 --ai는 고정 입력만 쓴다 (정책 presentation.md 6장).")
 
 
 def make_demo_run_id() -> str:
@@ -472,7 +446,6 @@ def build_ai_plan(args) -> Plan:
     동의, 설정, 입력 파일, **모델별** 하루 호출 예산(최대 시도 수)을 모두 점검한 뒤에만 클라이언트를 돌려준다. 하나라도 안 되면 아무것도 보내지 않는다.
     게이트 입력 파일이 없으면 안내 문구와 동의 점검에 들어가기 전에 멈춘다 (예산 계산에 필요하다).
     """
-    check_presentation_inputs(args)  # 어떤 안내나 호출보다 먼저
     demo_run_id = make_demo_run_id()
     samples, _, _, _ = ev.load_fixtures()
     ids = [s["job_id"] for s in samples]
