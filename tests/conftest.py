@@ -63,3 +63,30 @@ def ai_postings(results, tmp_path, monkeypatch):
     monkeypatch.setattr(ev, "load_env", lambda: {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-test", "GEMINI_RPM": "5", "GEMINI_RPD": "20"})
     monkeypatch.setattr(ev, "GeminiClient", Routing)
     return postings
+
+
+class Typed:
+    """run_presentation의 공고 선택 질문에 답을 넣어 준다 (이슈 #28, 정책 presentation.md 2-1).
+
+    기본은 매번 "3"이다(이전 기본 실행의 sample-3). answers에 목록을 주면 그 순서대로 답하고 목록이 떨어지면 입력 끝(None)이다.
+    prompts에는 질문 문구가 쌓인다.
+    """
+
+    def __init__(self):
+        self.answers = None
+        self.prompts = []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        if self.answers is None:
+            return "3"
+        return self.answers.pop(0) if self.answers else None
+
+
+@pytest.fixture(autouse=True)
+def typed(monkeypatch):
+    from tools import run_presentation
+
+    box = Typed()
+    monkeypatch.setattr(run_presentation, "read_line", box)
+    return box

@@ -253,7 +253,7 @@ def test_a_gate_failure_of_sample_3_stops_the_demo_without_calling_the_writer(en
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 4
     out = capsys.readouterr().out
-    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (gate_failed)" in out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_candidate)" in out
     assert not any(s.startswith("write_") for _, s, _ in log)
     assert "sample-3" not in [line for line in out.splitlines() if line.startswith("순위")] and (env.results / "pipeline").exists()  # 순위 결과는 저장돼 있다
     assert not (env.results / "drafts").exists()
@@ -276,7 +276,7 @@ def test_an_eligibility_failure_of_sample_3_stops_the_demo(env, monkeypatch, cap
     Fake, log, _ = make_fake({"find_evidence": LLMStageError("x")})  # 모든 공고의 근거 찾기가 실패한다
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 4
-    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (stage_failed)" in capsys.readouterr().out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_candidate)" in capsys.readouterr().out
     assert not any(s.startswith("write_") for _, s, _ in log)
 
 
@@ -373,3 +373,87 @@ def test_a_different_actual_model_is_marked_as_a_mismatch_and_an_unknown_one_is_
     assert "모델 요청 m-a / 실제 m-b (불일치)" in gate
     assert not any("불일치" in l for l in lines if l is not gate)
     assert any("실제 알 수 없음)" in l for l in lines)
+
+
+# ---------------------------------------------------------------- 사용자 공고 선택: 선택 공고가 뒤 단계를 모두 따라간다 (이슈 #28, 정책 2-1)
+
+def spy_selection(monkeypatch):
+    """select_job, job_info, build_writer_input이 받은 공고를 기록한다(동작은 그대로)."""
+    seen = {"select": [], "info": [], "writer_input": []}
+    real_select, real_info, real_wi = rp.select_job, rp.job_info, rp.build_writer_input
+
+    def select(run, job_id, **kw):
+        seen["select"].append((job_id, kw.get("posting_ref")))
+        return real_select(run, job_id, **kw)
+
+    def info(job_id, *a, **kw):
+        seen["info"].append(job_id)
+        return real_info(job_id, *a, **kw)
+
+    def writer_input(selected, *a, **kw):
+        seen["writer_input"].append(selected.job_id)
+        return real_wi(selected, *a, **kw)
+
+    monkeypatch.setattr(rp, "select_job", select)
+    monkeypatch.setattr(rp, "job_info", info)
+    monkeypatch.setattr(rp, "build_writer_input", writer_input)
+    return seen
+
+
+def test_the_chosen_job_is_used_everywhere_after_the_selection(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})  # sample-1의 초안 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    seen = spy_selection(monkeypatch)
+    typed.answers = ["1"]
+    assert run(env, "--task-links", "none") == 1  # 초안 단계 실패(가짜 응답 없음)라 1이고, 선택 이후는 sample-1을 따라갔다
+    out = capsys.readouterr().out
+    assert [(j, ref.endswith("#sample-1") if ref else ref) for j, ref in seen["select"]] == [("sample-1", True)]
+    assert seen["info"] == ["sample-1"] and seen["writer_input"] == ["sample-1"]
+    assert {job for _, stage, job in log if stage.startswith("write_")} == {"sample-1"}  # 초안 요청의 job_id
+    assert "[4] 공고 선택: 완료 (sample-1)" in out and "[4] 선택 공고: sample-1 - 공고 선택: 완료" in out
+
+
+def test_the_default_answer_in_tests_still_gives_the_old_sample_3_run(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    seen = spy_selection(monkeypatch)
+    assert run(env) == 0
+    assert seen["info"] == ["sample-3"] and "[4] 선택 공고: sample-3 - 공고 선택: 완료" in capsys.readouterr().out
+    assert len(typed.prompts) == 1
+
+
+def test_the_candidate_list_is_shown_and_wrong_answers_are_asked_again(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})  # sample-1의 초안 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["sample-1", "9", "1"]  # 가짜 게이트는 모든 공고를 같은 그룹으로 만들어 후보가 여럿이다
+    run(env, "--task-links", "none")
+    out = capsys.readouterr().out
+    assert "[sample-3] 3번" in out and "[sample-1] 1번" in out and len(typed.prompts) == 3
+    assert "남은 횟수 2회." in out and "남은 횟수 1회." in out and "[sample-3] 3번" in out
+    assert "[4] 공고 선택: 완료 (sample-1)" in out
+
+
+def test_with_the_fixture_default_only_sample_3_can_be_chosen_in_ai_mode(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1", "3"]
+    assert run(env) == 0
+    out = capsys.readouterr().out
+    assert "연결 후보 고정본은 sample-3에만 있어" in out and "[4] 공고 선택: 완료 (sample-3)" in out and len(typed.prompts) == 2
+
+
+def test_the_selection_prompt_does_not_touch_the_network_or_the_usage_log_before_the_pipeline_is_done(env, monkeypatch, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    calls_at_prompt = []
+    typed.answers = []
+    original = rp.read_line
+
+    def spy(prompt):
+        calls_at_prompt.append(len(log))
+        return None
+
+    monkeypatch.setattr(rp, "read_line", spy)
+    assert run(env) == 4
+    assert calls_at_prompt and calls_at_prompt[0] > 0  # 평가 호출이 모두 끝난 뒤에 묻는다
+    assert not any(s.startswith("write_") for _, s, _ in log) and original is not None

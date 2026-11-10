@@ -1,4 +1,5 @@
 """tools/run_presentation.py의 mock dry-run (정책 presentation.md 3·4·6장; 이슈 #24). 네트워크를 쓰지 않는다."""
+import dataclasses
 import re
 from datetime import datetime, timezone
 
@@ -6,12 +7,14 @@ import pytest
 
 from agents.application_writer import DraftError
 from core.llm_client import LLMQuotaExceeded, LLMStageError
+from core.schemas import DISPLAY_LABELS
 from pipeline_helpers import PROFILE, Wrap
 from tools import demo_support as ds
 from tools import run_demo as demo
 from tools import run_presentation as rp
 
 KINDS = ("cover_letter", "portfolio")
+READ_LINE = rp.read_line  # conftest의 autouse가 바꾸기 전의 원래 함수
 
 
 @pytest.fixture
@@ -147,8 +150,8 @@ def test_quota_exhaustion_in_the_cover_letter_leaves_the_portfolio_not_run(rdir,
 # ---------------------------------------------------------------- sample-3을 선택할 수 없을 때: 대체하지 않는다
 
 @pytest.mark.parametrize("error,code,exit_code", [
-    (LLMStageError("근거 단계 실패"), "stage_failed", 4),
-    (LLMQuotaExceeded("한도 소진"), "quota_exhausted", 3),
+    (LLMStageError("근거 단계 실패"), "no_candidate", 4),
+    (LLMQuotaExceeded("한도 소진"), "no_candidate", 3),  # 한도 때문에 평가가 멈춰 후보가 없으면 종료 코드는 한도 소진(3)이다
 ])
 def test_when_sample_3_cannot_be_selected_nothing_else_is_substituted(rdir, error, code, exit_code):
     plan = plan_for()
@@ -160,7 +163,7 @@ def test_when_sample_3_cannot_be_selected_nothing_else_is_substituted(rdir, erro
     assert plan.writer_client.calls == [] and result.drafts == {}  # 다른 공고로 대체하지 않고 Writer를 부르지 않는다
     assert result.exit_code == exit_code
     assert result.saved_run is not None and "sample-3" not in result.saved_run.ranking  # 저장된 순위는 남는다
-    if code == "stage_failed":
+    if exit_code == 4:
         assert result.saved_run.ranking and result.saved_run.ranking[0] != "sample-3"
 
 
@@ -168,7 +171,7 @@ def test_the_screen_names_the_reason_when_the_selection_failed(rdir):
     plan = plan_for()
     plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-3"): LLMStageError("x")})
     text = "\n".join(rp.render_result(rp.execute(plan)))
-    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (stage_failed)" in text and "[6] 자기소개서: 안 함" in text
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_candidate)" in text and "[6] 자기소개서: 안 함" in text
 
 
 # ---------------------------------------------------------------- 저장·재로딩 검증이 Writer의 선행 조건
@@ -389,3 +392,126 @@ def test_per_job_progress_lines_hold_only_ids_counts_and_states_and_are_off_with
     assert "[1~3] 게이트 1/6" in out and out.index("[1~3] 자격요건 6/6") < out.index("=== Career Support Agent")  # 요약보다 먼저 나온다
     assert main("-q", "--gate-cases", str(cases)) == 0
     assert "게이트 1/6" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- 사용자 공고 선택 (정책 presentation.md 2-1, 이슈 #28)
+
+def stopped_before_choice(tmp_path, errors=None):
+    """게이트는 fixture 결과, 자격요건은 mock으로 평가를 끝낸 실행(선택에서 입력 끝으로 멈춘다). (결과, 계획)을 돌려준다."""
+    plan = plan_for("--gate-cases", str(tmp_path / "none.json"))
+    if errors:
+        plan.evidence_client = Wrap(plan.evidence_client, errors)
+    return rp.execute(plan, choose=lambda found, notice: (None, "no_input")), plan
+
+
+def ai_candidates(result, plan, task_links="none"):
+    """실제 AI 실행(연결 후보 고정본이 아님)이었다면 후보가 어떻게 나오는지 본다."""
+    return rp.candidates(result.pipeline_run, dataclasses.replace(plan, mode="ai", task_links=task_links))
+
+
+def test_candidates_are_completed_primary_jobs_in_rank_order_with_the_eligibility_state(tmp_path):
+    result, plan = stopped_before_choice(tmp_path)
+    found, notice = ai_candidates(result, plan)
+    assert notice is None and [c.job_id for c in found] == ["sample-3", "sample-1"]  # 직무 불일치(참고용) 공고는 후보가 아니다
+    assert [c.number for c in found] == [3, 1]
+    assert re.fullmatch(r"1위 \[sample-3\] 3번 .+ — 조건부 적합", found[0].line)
+    assert re.fullmatch(r"2위 \[sample-1\] 1번 .+ — 필수 요건 미충족", found[1].line)  # 자격요건 미충족도 후보이고 상태가 보인다
+    ranked_primary = [j.job_id for j in sorted(result.pipeline_run.jobs, key=lambda j: j.rank) if j.gate.ranking_group == "primary"]
+    assert [c.job_id for c in found] == ranked_primary
+
+
+def test_the_state_in_a_candidate_line_comes_from_the_eligibility_result(tmp_path):
+    result, plan = stopped_before_choice(tmp_path)
+    for c in ai_candidates(result, plan)[0]:
+        job = next(j for j in result.pipeline_run.jobs if j.job_id == c.job_id)
+        assert c.line.endswith(" — " + DISPLAY_LABELS[job.eligibility.verdict])
+    assert len({c.line.rsplit(" — ", 1)[1] for c in ai_candidates(result, plan)[0]}) == 2  # 상태가 공고마다 다르게 나온다
+
+
+def test_a_job_whose_evaluation_failed_is_not_a_candidate(tmp_path):
+    result, plan = stopped_before_choice(tmp_path, {("find_evidence", "sample-1"): LLMStageError("x")})
+    assert [c.job_id for c in ai_candidates(result, plan)[0]] == ["sample-3"]
+
+
+def test_mock_and_the_task_link_fixture_leave_only_sample_3_and_say_why(tmp_path):
+    result, plan = stopped_before_choice(tmp_path)
+    found, notice = rp.candidates(result.pipeline_run, plan)
+    assert [c.job_id for c in found] == ["sample-3"] and "mock은 sample-3 초안만" in notice
+    found, notice = ai_candidates(result, plan, task_links="fixture")
+    assert [c.job_id for c in found] == ["sample-3"] and "연결 후보 고정본" in notice
+    assert ai_candidates(result, plan, task_links="ai")[1] is None and len(ai_candidates(result, plan, task_links="ai")[0]) == 2
+
+
+def test_no_candidate_when_nothing_in_the_top_group_finished(tmp_path):
+    ids = [f"sample-{n}" for n in range(1, 7)]
+    result, plan = stopped_before_choice(tmp_path, {("find_evidence", i): LLMStageError("x") for i in ids})
+    assert ai_candidates(result, plan) == ([], None)
+
+
+def test_the_question_is_always_asked_and_sample_3_is_not_chosen_for_the_user(rdir, capsys, typed):
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "자소서/포트폴리오 초안을 생성할 공고 번호를 입력해주세요." in out and "공고 번호만 입력하세요 (예: 3): " in typed.prompts
+    assert "[sample-3] 3번" in out and out.index("입력해주세요") < out.index("[4] 공고 선택: 완료")
+    typed.answers = []
+    assert main() == 4  # 입력이 없으면 sample-3으로 대신하지 않는다
+    out = capsys.readouterr().out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_input)" in out and "[6] 자기소개서: 안 함" in out
+
+
+def test_without_input_nothing_after_the_selection_is_started(rdir, typed):
+    plan = plan_for()
+    plan.writer_client = Wrap(plan.writer_client)
+    typed.answers = []
+    result = rp.execute(plan)
+    assert (result.steps["selection"].status, result.steps["selection"].code) == ("failed", "no_input") and result.exit_code == 4
+    assert plan.writer_client.calls == [] and result.drafts == {} and result.selected_job_id is None
+    assert [result.steps[n].status for n in ("writer_input", "cover_letter", "portfolio")] == ["not_run"] * 3
+    assert result.saved_run is not None  # 순위 결과는 저장돼 있다
+
+
+def test_a_number_outside_the_candidates_is_asked_again(rdir, typed):
+    typed.answers = ["1", "3"]  # mock의 후보는 sample-3뿐이라 1번은 거절된다
+    result = rp.execute(plan_for())
+    assert result.selected_job_id == "sample-3" and result.exit_code == 0 and len(typed.prompts) == 2
+
+
+@pytest.mark.parametrize("answers,expected_prompts", [(["sample-3", "", "x"], 3), (["9", "0", "-3"], 3), (["sample-3", "sample-3", "sample-3", "3"], 3)])
+def test_three_wrong_answers_end_with_selection_failed(rdir, typed, capsys, answers, expected_prompts):
+    typed.answers = list(answers)
+    result = rp.execute(plan_for())
+    assert (result.steps["selection"].code, result.exit_code) == ("invalid_input", 4) and len(typed.prompts) == expected_prompts
+    assert result.drafts == {} and "남은 횟수 1회" in capsys.readouterr().out
+
+
+def test_an_id_string_is_refused_and_digits_with_spaces_are_accepted(rdir, typed):
+    typed.answers = ["sample-3", " 3 "]
+    assert rp.execute(plan_for()).selected_job_id == "sample-3"
+
+
+def test_with_no_candidate_the_question_is_not_asked_and_the_reason_is_shown(rdir, typed, capsys, tmp_path):
+    ids = [f"sample-{n}" for n in range(1, 7)]
+    plan = plan_for("--gate-cases", str(tmp_path / "none.json"))
+    plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", i): LLMStageError("x") for i in ids})
+    result = rp.execute(plan)
+    assert typed.prompts == [] and "상위 직무 매칭 공고가 없습니다." in capsys.readouterr().out
+    assert (result.steps["selection"].code, result.exit_code) == ("no_candidate", 4)
+
+
+def test_the_question_and_the_candidates_are_shown_even_with_quiet(rdir, capsys):
+    assert main("-q") == 0
+    out = capsys.readouterr().out
+    assert "공고 번호를 입력해주세요" in out and "[sample-3] 3번" in out
+
+
+def test_read_line_returns_none_when_input_ends_or_cannot_be_read(monkeypatch):
+    def raising(error):
+        def fake_input(prompt=""):
+            raise error
+        return fake_input
+
+    for error in (EOFError(), OSError("입력창 없음")):
+        monkeypatch.setattr("builtins.input", raising(error))
+        assert READ_LINE("질문") is None
+    monkeypatch.setattr("builtins.input", lambda prompt="": "3")
+    assert READ_LINE("질문") == "3"

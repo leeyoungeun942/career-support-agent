@@ -115,7 +115,7 @@
 | 모두 완료 | 전부 `completed` | 0 |
 | 끝까지 갔지만 실패 단계가 있음: 다른 공고의 `failed`, 한쪽 초안 실패(`DraftError`, `LLMStageError`), **초안 생성은 성공했으나 확인용 md 저장이 실패** | 해당 단계 `failed` 또는 `completed(saved=False)` | 1 |
 | 시작하지 않음: 동의 없음, 설정·키 오류, 입력 파일 없음·어긋남, 호출 예산 부족 | 단계 `budget` 등 `failed`, 이후 `not_run`, 호출 0회 | 2 |
-| 호출 한도 소진으로 멈춤 (`sample-3`이 한도 때문에 `failed`·`not_run`이어도 3) | `LLMQuotaExceeded` 단계 `failed`, 남은 단계 `not_run` | 3 |
+| 호출 한도 소진으로 멈춤 (평가가 한도 때문에 멈춰 선택 후보가 없어도 3) | `LLMQuotaExceeded` 단계 `failed`, 남은 단계 `not_run` | 3 |
 | 한도와 무관한 시연 중단: 공고 선택 실패(`selection_failed`: 사유 코드 `no_candidate`, `no_input`, `invalid_input`, 또는 선택한 공고를 `select_job`이 거부한 경우의 `gate_failed`, `stage_failed` 등) 또는 저장·재로딩 검증 실패(`persistence_failed`) | 해당 단계 `failed`, 이후 `not_run` | 4 |
 
 - **초안 생성 성공 + md 저장 실패**는 그 초안 단계를 `completed`로 두되 `saved=False`로 표시하고 화면에 "생성 성공, 저장 실패"로 구분한다. 생성한 초안은 메모리(`PresentationResult`)에 남고, 다른 초안과 순위는 영향이 없다.
