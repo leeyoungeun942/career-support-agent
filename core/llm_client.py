@@ -36,6 +36,18 @@ MAX_WAIT_SECONDS = 60.0
 REQUEST_TIMEOUT_SECONDS = 120  # 응답이 멎은 호출을 끊는다. 시간 초과는 네트워크 오류로 보고 재시도한다
 
 
+# LLM 단계명 -> 작업 종류 (사용량 기록의 task, 정책 presentation.md 6장). 모르는 단계명은 other
+STAGE_TASKS = {
+    "gate_label": "gate", "extract_requirements": "eligibility", "find_evidence": "eligibility",
+    "write_cover_letter": "writer", "write_portfolio": "writer", "link_tasks": "writer",
+}
+MODEL_ROLES = ("judge", "writer")  # JUDGE(판정 모델): 게이트·자격요건, WRITER(생성 모델): 자소서·포트폴리오 (정책 presentation.md 1장)
+
+
+def task_of(stage: str) -> str:
+    return STAGE_TASKS.get(stage, "other")
+
+
 class LLMError(Exception):
     """이 모듈이 내는 오류의 뿌리. 메시지에 키·프롬프트·모델 출력 원문을 넣지 않는다."""
 
@@ -163,11 +175,13 @@ class UsageLog:
         return self._now().astimezone(PACIFIC).date().isoformat()
 
     def record(self, request: LLMRequest, *, model: str, input_tokens: int = 0, output_tokens: int = 0,
-               cached: bool = False, ok: bool = True, error: str | None = None, config_id: str = "") -> None:
+               cached: bool = False, ok: bool = True, error: str | None = None, config_id: str = "",
+               model_actual: str | None = None) -> None:
+        """model은 요청한 모델 ID, model_actual은 응답이 알려 준 실제 모델(모르면 None)이다. task는 단계명에서 정한다."""
         row = {
             "ts": self._now().astimezone(timezone.utc).isoformat(timespec="seconds"),
-            "date_pt": self.pacific_date(), "run_id": self.run_id, "stage": request.stage, "job_id": request.job_id, "model": model,
-            "config": config_id, "prompt_version": request.prompt_version,
+            "date_pt": self.pacific_date(), "run_id": self.run_id, "stage": request.stage, "task": task_of(request.stage), "job_id": request.job_id,
+            "model": model, "model_actual": model_actual, "config": config_id, "prompt_version": request.prompt_version,
             "input_tokens": input_tokens, "output_tokens": output_tokens, "cached": cached, "ok": ok,
         }
         if error:  # 실패한 시도만. 오류 종류와 코드뿐이고 메시지는 쓰지 않는다(키·프롬프트가 섞일 수 있다)
@@ -176,8 +190,9 @@ class UsageLog:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    def _run_rows(self, stage: str | None = None, exclude_stage: str | None = None):
-        """이 실행(run_id)의 기록 줄. stage를 주면 그 단계만, exclude_stage를 주면 그 단계를 뺀다."""
+    def _run_rows(self, stage: str | None = None, exclude_stage: str | None = None, task: str | None = None):
+        """이 실행(run_id)의 기록 줄. stage를 주면 그 단계만, exclude_stage를 주면 그 단계를 뺀다. task를 주면 그 작업 종류만 본다
+        (이전 기록에는 task 칸이 없어 단계명에서 다시 정한다)."""
         if not self.path.exists():
             return
         for line in self.path.read_text(encoding="utf-8").splitlines():
@@ -189,15 +204,17 @@ class UsageLog:
                 continue
             if (stage is not None and row.get("stage") != stage) or (exclude_stage is not None and row.get("stage") == exclude_stage):
                 continue
+            if task is not None and task_of(row.get("stage", "")) != task:
+                continue
             yield row
 
-    def run_totals(self, stage: str | None = None, exclude_stage: str | None = None) -> dict:
+    def run_totals(self, stage: str | None = None, exclude_stage: str | None = None, task: str | None = None) -> dict:
         """이 실행(run_id)의 호출 수(시도)·실패 수·캐시 적중 수·토큰. 다른 실행은 더하지 않는다.
 
         stage나 exclude_stage로 LLM 단계명(LLMRequest.stage)을 걸러 한 단계만, 또는 한 단계를 뺀 합계를 낼 수 있다 (data-contract 3-1).
         """
         totals = {"calls": 0, "failed": 0, "cache_hits": 0, "input_tokens": 0, "output_tokens": 0}
-        for row in self._run_rows(stage, exclude_stage):
+        for row in self._run_rows(stage, exclude_stage, task):
             if row.get("cached"):
                 totals["cache_hits"] += 1
                 continue
@@ -207,12 +224,18 @@ class UsageLog:
             totals["output_tokens"] += row.get("output_tokens", 0)
         return totals
 
-    def logical_calls(self, stage: str | None = None, exclude_stage: str | None = None) -> int:
+    def logical_calls(self, stage: str | None = None, exclude_stage: str | None = None, task: str | None = None) -> int:
         """이 실행의 논리 호출 수: (stage, job_id) 고유 쌍의 수. 재시도해도 하나이고 캐시 적중도 센다 (data-contract 3-1).
 
         한도 점검에서 막혀 첫 시도 전에 멈춘 요청은 기록이 없어 세지 않는다.
         """
-        return len({(row.get("stage"), row.get("job_id")) for row in self._run_rows(stage, exclude_stage)})
+        return len({(row.get("stage"), row.get("job_id")) for row in self._run_rows(stage, exclude_stage, task)})
+
+    def models_used(self, task: str | None = None) -> dict[str, list[str]]:
+        """이 실행에서 task(없으면 전체)의 호출이 쓴 모델: {"requested": [...], "actual": [...]}. 실제 모델은 응답이 알려 준 것만 센다."""
+        rows = list(self._run_rows(task=task))
+        return {"requested": sorted({r["model"] for r in rows if r.get("model")}),
+                "actual": sorted({r["model_actual"] for r in rows if r.get("model_actual")})}
 
     def calls_today(self, model: str) -> int:
         """오늘(태평양 시간) 그 모델로 실제 보낸 호출 수. 캐시 적중은 세지 않고, 실패한 시도는 센다(한도는 시도마다 줄어든다)."""
@@ -322,22 +345,34 @@ class GeminiSettings:
         return f"GeminiSettings(model={self.model!r}, rpm={self.rpm}, rpd={self.rpd}, api_key=<{'set' if self.api_key else 'unset'}>)"
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> "GeminiSettings":
-        """GEMINI_API_KEY만 읽는다. GOOGLE_API_KEY가 있으면 SDK가 우선할 수 있어 경고한다 (정책 16장, 플랜 D12)."""
+    def from_env(cls, env: Mapping[str, str], role: str | None = None) -> "GeminiSettings":
+        """GEMINI_API_KEY만 읽는다. GOOGLE_API_KEY가 있으면 SDK가 우선할 수 있어 경고한다 (정책 16장, 플랜 D12).
+
+        role이 "judge"나 "writer"이면 GEMINI_MODEL_<ROLE>, GEMINI_RPM_<ROLE>, GEMINI_RPD_<ROLE>를 먼저 읽고 없으면 GEMINI_MODEL, GEMINI_RPM, GEMINI_RPD로
+        대체한다. role=None은 대체 없이 지금까지와 같다 (정책 presentation.md 1장).
+        """
+        if role is not None and role not in MODEL_ROLES:
+            raise ValueError(f"role은 {MODEL_ROLES} 중 하나여야 한다: {role!r}")
+        suffix = f"_{role.upper()}" if role else ""
+
+        def pick(name: str) -> str:
+            return ((env.get(name + suffix) if suffix else None) or env.get(name) or "").strip()
+
         if env.get("GOOGLE_API_KEY"):
             warnings.warn(
                 "GOOGLE_API_KEY가 환경에 있다. 이 프로젝트는 GEMINI_API_KEY만 쓴다. "
                 "결제가 연결됐을 수 있는 다른 키이면 지우거나 확인하라.", stacklevel=2,
             )
         key = (env.get("GEMINI_API_KEY") or "").strip()
-        model = (env.get("GEMINI_MODEL") or "").strip()
+        model = pick("GEMINI_MODEL")
         if not key:
             raise LLMConfigError("GEMINI_API_KEY가 없다. .env.example을 .env로 복사하고 AI Studio에서 받은 키를 넣어라")
         if not model:
-            raise LLMConfigError("GEMINI_MODEL이 없다. 정확한 모델 ID를 .env에 적어라(latest·preview 별칭 금지)")
+            raise LLMConfigError(f"GEMINI_MODEL{suffix}이(가) 없다. 정확한 모델 ID를 .env에 적어라(latest·preview 별칭 금지)"
+                                 + (". 비워 두면 GEMINI_MODEL을 쓴다" if suffix else ""))
         try:
-            rpm = int(env.get("GEMINI_RPM") or DEFAULT_RPM)
-            rpd = int(env.get("GEMINI_RPD") or DEFAULT_RPD)
+            rpm = int(pick("GEMINI_RPM") or DEFAULT_RPM)
+            rpd = int(pick("GEMINI_RPD") or DEFAULT_RPD)
         except ValueError:
             raise LLMConfigError("GEMINI_RPM, GEMINI_RPD는 정수여야 한다") from None
         if rpm < 1 or rpd < 1:
@@ -421,7 +456,7 @@ class GeminiClient(BaseClient):
     generation_config = {"response_mime_type": "application/json", "sampling": "default"}
 
     def __init__(self, settings: GeminiSettings, usage: UsageLog | None = None, *,
-                 generate: Callable[[LLMRequest], tuple[str, int, int]] | None = None,
+                 generate: Callable[[LLMRequest], tuple] | None = None,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
         self.settings = settings
         self.model = settings.model
@@ -454,7 +489,7 @@ class GeminiClient(BaseClient):
                 self._sleep(wait)
         self._last_call = self._clock()
 
-    def _sdk_generate(self, request: LLMRequest) -> tuple[str, int, int]:
+    def _sdk_generate(self, request: LLMRequest) -> tuple[str, int, int, str | None]:
         from google import genai  # 호출 시점에만 가져온다
         from google.genai import types
 
@@ -469,7 +504,7 @@ class GeminiClient(BaseClient):
         r = self._sdk_client.models.generate_content(model=self.model, contents=request.prompt, config=config)
         usage = r.usage_metadata
         out = (getattr(usage, "candidates_token_count", 0) or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
-        return r.text or "", getattr(usage, "prompt_token_count", 0) or 0, out
+        return r.text or "", getattr(usage, "prompt_token_count", 0) or 0, out, getattr(r, "model_version", None) or None
 
     def _fail(self, request: LLMRequest, what: str) -> LLMStageError:
         return LLMStageError(f"{request.stage}({request.job_id}): {what}")
@@ -481,7 +516,9 @@ class GeminiClient(BaseClient):
                 raise LLMQuotaExceeded(f"{self.model}: 오늘 호출 한도(GEMINI_RPD={self.settings.rpd})에 닿았다")
             self._wait_for_interval()
             try:
-                text, tokens_in, tokens_out = self._generate(request)
+                result = self._generate(request)  # (text, 입력 토큰, 출력 토큰[, 응답이 알려 준 실제 모델])
+                text, tokens_in, tokens_out = result[:3]
+                model_actual = result[3] if len(result) > 3 else None
             except Exception as e:  # noqa: BLE001 - SDK 예외를 모두 감싸 키·원시 오류가 새지 않게 한다
                 if self.usage:
                     code = getattr(e, "code", None)
@@ -492,7 +529,8 @@ class GeminiClient(BaseClient):
                 self._sleep(wait)
                 continue
             if self.usage:
-                self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out, config_id=self.config_id)
+                self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out, config_id=self.config_id,
+                                  model_actual=model_actual)
             return LLMResponse(data=text, input_tokens=tokens_in, output_tokens=tokens_out, model=self.model)  # type: ignore[arg-type]
 
     def _retry_wait(self, e: Exception, attempt: int, request: LLMRequest) -> float:
