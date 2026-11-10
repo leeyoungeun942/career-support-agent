@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, format_timing, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock, synthetic_posting
 from core.pipeline import assess_eligibility
 from core.rules import ProfileEvidenceError, rank_jobs
@@ -308,6 +308,7 @@ def run_ai(args):
     t, after = usage.run_totals(), usage.calls_today(settings.model)
     print(f"이번 실행({usage.run_id}) 호출 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
           f"오늘 누적 {after}/{settings.rpd} (모델 {settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
+    print(f"응답 시간(모델 호출만, 한도 대기 제외): {format_timing(usage.timing())}.")
     if stopped:
         print("한도 소진으로 중간에 멈췄다. 태평양 시간 자정 이후에 이어서 하라.", file=sys.stderr)
         return 3

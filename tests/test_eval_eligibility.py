@@ -370,3 +370,10 @@ def test_ai_fresh_cache_uses_a_run_specific_directory_and_reports_run_totals(ai_
     assert not (cache_root / "extract").exists()
     run_dirs = list(cache_root.glob("run-*"))
     assert len(run_dirs) == 1 and len(list(run_dirs[0].glob("*.json"))) == 6
+
+
+def test_ai_run_prints_the_response_time_line(ai_env, capsys):
+    _, postings = ai_env
+    with pytest.raises(SystemExit):
+        tool.main(ai_args(postings, "--fresh-cache"))
+    assert "응답 시간(모델 호출만, 한도 대기 제외):" in capsys.readouterr().out

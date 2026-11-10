@@ -513,3 +513,8 @@ def test_changing_the_variant_text_under_the_same_version_changes_the_recorded_h
     second = capsys.readouterr().out
     hashes = [re.search(r"해시 ([0-9a-f]{8})", t).group(1) for t in (first, second)]
     assert hashes[0] != hashes[1] and FakeGemini.called  # 내용이 달라 캐시를 쓰지 못하고 다시 호출한다
+
+
+def test_ai_run_prints_the_response_time_line(ai_env, capsys):
+    assert main(*AI) == 0
+    assert "응답 시간(모델 호출만, 한도 대기 제외):" in capsys.readouterr().out

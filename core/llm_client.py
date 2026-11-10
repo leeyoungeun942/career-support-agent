@@ -176,14 +176,19 @@ class UsageLog:
 
     def record(self, request: LLMRequest, *, model: str, input_tokens: int = 0, output_tokens: int = 0,
                cached: bool = False, ok: bool = True, error: str | None = None, config_id: str = "",
-               model_actual: str | None = None) -> None:
-        """model은 요청한 모델 ID, model_actual은 응답이 알려 준 실제 모델(모르면 None)이다. task는 단계명에서 정한다."""
+               model_actual: str | None = None, duration_ms: int | None = None) -> None:
+        """model은 요청한 모델 ID, model_actual은 응답이 알려 준 실제 모델(모르면 None)이다. task는 단계명에서 정한다.
+
+        duration_ms는 시도 한 번의 응답 시간이다. 한도·재시도 대기는 들어 있지 않다. 캐시 적중 줄에는 없다 (정책 presentation.md 6장).
+        """
         row = {
             "ts": self._now().astimezone(timezone.utc).isoformat(timespec="seconds"),
             "date_pt": self.pacific_date(), "run_id": self.run_id, "stage": request.stage, "task": task_of(request.stage), "job_id": request.job_id,
             "model": model, "model_actual": model_actual, "config": config_id, "prompt_version": request.prompt_version,
             "input_tokens": input_tokens, "output_tokens": output_tokens, "cached": cached, "ok": ok,
         }
+        if duration_ms is not None:
+            row["duration_ms"] = duration_ms
         if error:  # 실패한 시도만. 오류 종류와 코드뿐이고 메시지는 쓰지 않는다(키·프롬프트가 섞일 수 있다)
             row["error"] = error
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +229,12 @@ class UsageLog:
             totals["output_tokens"] += row.get("output_tokens", 0)
         return totals
 
+    def timing(self, stage: str | None = None, exclude_stage: str | None = None, task: str | None = None) -> dict:
+        """이 실행의 응답 시간: 시간이 기록된 시도 수(timed)와 합계·최대(밀리초). 캐시 적중 줄과 시간 칸이 없는 이전 줄은 세지 않는다."""
+        durations = [row["duration_ms"] for row in self._run_rows(stage, exclude_stage, task)
+                     if not row.get("cached") and isinstance(row.get("duration_ms"), int)]
+        return {"timed": len(durations), "total_ms": sum(durations), "max_ms": max(durations, default=0)}
+
     def logical_calls(self, stage: str | None = None, exclude_stage: str | None = None, task: str | None = None) -> int:
         """이 실행의 논리 호출 수: (stage, job_id) 고유 쌍의 수. 재시도해도 하나이고 캐시 적중도 센다 (data-contract 3-1).
 
@@ -251,6 +262,13 @@ class UsageLog:
             if row.get("date_pt") == today and row.get("model") == model and not row.get("cached"):
                 count += 1
         return count
+
+
+def format_timing(timing: dict) -> str:
+    """응답 시간 요약 문구. 모델 호출만 잰 값이라 한도 대기를 빼며, 사용자가 체감하는 전체 시간과 다르다 (정책 presentation.md 6장)."""
+    if not timing["timed"]:
+        return "응답 시간 기록 없음"
+    return f"평균 응답 시간 {timing['total_ms'] / timing['timed'] / 1000:.1f}초(최대 {timing['max_ms'] / 1000:.1f}초, {timing['timed']}회 기록)"
 
 
 # ---------------------------------------------------------------- 캐시
@@ -515,6 +533,7 @@ class GeminiClient(BaseClient):
             if self.remaining_calls() <= 0:
                 raise LLMQuotaExceeded(f"{self.model}: 오늘 호출 한도(GEMINI_RPD={self.settings.rpd})에 닿았다")
             self._wait_for_interval()
+            started = self._clock()  # 한도 대기 뒤부터 잰다. 재시도 대기는 다음 시도의 started 앞이라 섞이지 않는다
             try:
                 result = self._generate(request)  # (text, 입력 토큰, 출력 토큰[, 응답이 알려 준 실제 모델])
                 text, tokens_in, tokens_out = result[:3]
@@ -522,7 +541,7 @@ class GeminiClient(BaseClient):
             except Exception as e:  # noqa: BLE001 - SDK 예외를 모두 감싸 키·원시 오류가 새지 않게 한다
                 if self.usage:
                     code = getattr(e, "code", None)
-                    self.usage.record(request, model=self.model, ok=False, config_id=self.config_id,
+                    self.usage.record(request, model=self.model, ok=False, config_id=self.config_id, duration_ms=self._elapsed_ms(started),
                                       error=type(e).__name__ + (f" {code}" if isinstance(code, int) else ""))
                 wait = self._retry_wait(e, attempt, request)
                 attempt += 1
@@ -530,8 +549,11 @@ class GeminiClient(BaseClient):
                 continue
             if self.usage:
                 self.usage.record(request, model=self.model, input_tokens=tokens_in, output_tokens=tokens_out, config_id=self.config_id,
-                                  model_actual=model_actual)
+                                  model_actual=model_actual, duration_ms=self._elapsed_ms(started))
             return LLMResponse(data=text, input_tokens=tokens_in, output_tokens=tokens_out, model=self.model)  # type: ignore[arg-type]
+
+    def _elapsed_ms(self, started: float) -> int:
+        return max(round((self._clock() - started) * 1000), 0)
 
     def _retry_wait(self, e: Exception, attempt: int, request: LLMRequest) -> float:
         """재시도할 오류면 대기 시간을, 아니면 예외를 낸다."""
