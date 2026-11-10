@@ -22,7 +22,7 @@ from pathlib import Path
 
 from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
 from agents.task_linker import build_links, link_tasks
-from core.llm_client import MAX_RETRIES, GeminiClient, LLMClient, LLMQuotaExceeded, LLMStageError, UsageLog, load_env
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMClient, LLMQuotaExceeded, LLMStageError, UsageLog, format_timing, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock
 from core.pipeline import ScenarioJob, run_pipeline
 from core.pipeline_run import PipelineRun
@@ -77,6 +77,7 @@ class TaskUsage:
     output_tokens: int = 0
     requested: list[str] = field(default_factory=list)
     actual: list[str] = field(default_factory=list)
+    timing: dict = field(default_factory=lambda: {"timed": 0, "total_ms": 0, "max_ms": 0})
 
 
 @dataclass
@@ -273,7 +274,8 @@ def _usage_summary(plan: Plan, result: PresentationResult) -> None:
         totals = plan.usage.run_totals(task=task)
         models = plan.usage.models_used(task)
         result.usage[task] = TaskUsage(plan.usage.logical_calls(task=task), totals["calls"], totals["cache_hits"],
-                                       totals["input_tokens"], totals["output_tokens"], models["requested"], models["actual"])
+                                       totals["input_tokens"], totals["output_tokens"], models["requested"], models["actual"],
+                                       plan.usage.timing(task=task))
     for model, limit in plan.limits.items():
         result.today[model] = (plan.usage.calls_today(model), limit)
 
@@ -445,6 +447,7 @@ def render_result(result: PresentationResult, quiet: bool = False) -> list[str]:
         mismatch = " (불일치)" if u.actual and set(u.actual) != set(u.requested) else ""  # 실제 모델을 모르면 불일치가 아니다
         lines.append(f"  {label}: 호출 논리 {u.logical}회, 시도 {u.attempts}회, 캐시 적중 {u.cache_hits}, 토큰 입력 {u.input_tokens} / 출력 {u.output_tokens}"
                      f" (모델 요청 {', '.join(u.requested) or '-'} / 실제 {actual}{mismatch})")
+        lines.append(f"    {format_timing(u.timing)}")
     for model, (used, limit) in result.today.items():
         lines.append(f"  오늘 누적 {used}/{limit} (모델 {model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
     lines.append(f"  종료 상태: 코드 {result.exit_code}")

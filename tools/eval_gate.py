@@ -30,7 +30,7 @@ from pathlib import Path
 from core import job_gate as gate
 from core.job_gate_ai import make_llm_judge
 from core.job_gate_mock import make_label_mock
-from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, load_env
+from core.llm_client import MAX_RETRIES, GeminiClient, LLMQuotaExceeded, LLMStageError, format_timing, load_env
 from core.prompts import load_prompt, load_prompt_file, prompt_hash
 from core.schemas import DISPLAY_LABELS
 from tools.ai_common import AiSetupError, prepare_session
@@ -417,6 +417,7 @@ def run_sample_ai(args, cases_path=None, expected_path=None):
         print("경고: 실제 호출이 계산한 최대치를 넘었다. 호출 예산 계산에 결함이 있다.", file=sys.stderr)
     print(f"이번 실행({usage.run_id}) 시도 {t['calls']}회(실패 {t['failed']}), 캐시 적중 {t['cache_hits']}, 토큰 입력 {t['input_tokens']} / 출력 {t['output_tokens']}. "
           f"오늘 누적 {after}/{settings.rpd} (모델 {settings.model}). 결제 연결 여부는 코드가 확인할 수 없다: AI Studio에서 확인하라.")
+    print(f"응답 시간(모델 호출만, 한도 대기 제외): {format_timing(usage.timing())}.")
     if stopped:
         print("한도 소진으로 중간에 멈췄다. 태평양 시간 자정 이후에 이어서 하라.", file=sys.stderr)
         return 3
