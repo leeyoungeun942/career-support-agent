@@ -64,6 +64,7 @@ def env(tmp_path, monkeypatch):
     postings.write_text(json.dumps({"postings": {s["job_id"]: {"text": synthetic_posting(s) + f"\n채용공고명: 직무{s['number']}"} for s in SAMPLES}}, ensure_ascii=False),
                         encoding="utf-8")
     gate_cases = write_gate_cases(tmp_path / "gate_cases.json")
+    monkeypatch.setattr(rp, "CANONICAL_INPUT_SHA256", {"postings": rp.input_digest(postings), "gate_cases": rp.input_digest(gate_cases)})  # 합성 입력을 "고정 발표 입력"으로 본다
     settings = dict(BASE_ENV)
     monkeypatch.setattr(rp, "load_env", lambda: dict(settings))
     return type("Env", (), {"settings": settings, "postings": postings, "gate_cases": gate_cases, "results": tmp_path / "results"})()
@@ -360,3 +361,52 @@ def test_the_summary_shows_a_stage_failure_of_the_judge_model_by_name_only(env, 
     run(env)
     out = capsys.readouterr().out
     assert "게이트 AI 오류" in out and "SECRET-DETAIL" not in out and "시도" in out
+
+
+# ---------------------------------------------------------------- 고정 입력 대조와 모델 불일치 표시 (PR 리뷰)
+
+def test_other_input_files_are_refused_before_any_notice_client_or_call(env, monkeypatch, capsys, tmp_path):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    other = tmp_path / "other_postings.json"
+    data = json.loads(env.postings.read_text(encoding="utf-8"))
+    data["postings"]["sample-1"]["text"] += " 개인정보가 들어 있을 수 있는 다른 내용"
+    other.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    for flag, path in (("--postings", other), ("--gate-cases", other), ("--postings", tmp_path / "not_json.txt")):
+        if path.name == "not_json.txt":
+            path.write_text("not json", encoding="utf-8")
+        argv = [*CONSENT, "--postings", str(env.postings), "--gate-cases", str(env.gate_cases)]
+        argv[argv.index(flag) + 1] = str(path)
+        with pytest.raises(SystemExit) as e:
+            rp.main(argv)
+        assert e.value.code == 2
+    captured = capsys.readouterr()
+    assert "고정된 발표 입력과 내용이 다르다" in captured.err and "무료 티어" not in captured.out
+    assert log == [] and not (env.results / "llm_usage.jsonl").exists()  # 클라이언트를 만들지도, 기록을 남기지도 않았다
+
+
+def test_the_same_content_in_a_reformatted_file_at_another_path_is_accepted(env, monkeypatch, tmp_path):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    copy = tmp_path / "copy.json"
+    copy.write_text(json.dumps(json.loads(env.postings.read_text(encoding="utf-8")), ensure_ascii=False, indent=4), encoding="utf-8")
+    env.postings = copy
+    assert run(env) == 0
+
+
+def test_the_pinned_digests_match_the_local_sample_files_when_they_exist():
+    if not (rp.ev.POSTINGS_JSON.exists() and rp.GATE_CASES_JSON.exists()):
+        pytest.skip("로컬에 발표 입력 파일이 없다(커밋하지 않는 파일)")
+    assert rp.input_digest(rp.ev.POSTINGS_JSON) == rp.CANONICAL_INPUT_SHA256["postings"]
+    assert rp.input_digest(rp.GATE_CASES_JSON) == rp.CANONICAL_INPUT_SHA256["gate_cases"]
+
+
+def test_a_different_actual_model_is_marked_as_a_mismatch_and_an_unknown_one_is_not():
+    differ = rp.PresentationResult("ai", "demo-x", {n: rp.Step(n) for n in rp.STEP_NAMES}, models={"judge": "m-a", "writer": "m-a"})
+    differ.usage = {"gate": rp.TaskUsage(1, 1, 0, 1, 1, ["m-a"], ["m-b"]), "eligibility": rp.TaskUsage(1, 1, 0, 1, 1, ["m-a"], ["m-a"]),
+                    "writer": rp.TaskUsage(1, 1, 0, 1, 1, ["m-a"], [])}
+    lines = [l for l in rp.render_result(differ) if "모델 요청" in l]
+    gate = next(l for l in lines if l.strip().startswith("직무 게이트"))
+    assert "모델 요청 m-a / 실제 m-b (불일치)" in gate
+    assert not any("불일치" in l for l in lines if l is not gate)
+    assert any("실제 알 수 없음)" in l for l in lines)
