@@ -543,3 +543,14 @@ def test_read_line_itself_prints_nothing(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda prompt="": "SECRET-TEXT")
     monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: False, raising=False)
     assert READ_LINE("질문") == "SECRET-TEXT" and capsys.readouterr().out == ""
+
+
+def test_the_mock_run_does_not_check_the_profile_for_contact_formats_because_nothing_leaves(rdir, monkeypatch):
+    real = rp.ev.load_fixtures
+
+    def load():
+        samples, profile, evidence, gates = real()
+        return samples, profile.model_copy(update={"skills": [*profile.skills, "hong.gildong@example.com"]}), evidence, gates
+
+    monkeypatch.setattr(rp.ev, "load_fixtures", load)
+    assert main() == 0

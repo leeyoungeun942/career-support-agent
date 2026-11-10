@@ -499,3 +499,29 @@ def test_the_notice_names_twelve_writer_attempts_and_the_new_total(env, monkeypa
     judge_calls, writer_calls = budget(env)
     out = capsys.readouterr().out
     assert f"WRITER {writer_calls}회" in out and f"합계 {judge_calls + writer_calls}회" in out and writer_calls == 12
+
+
+# ---------------------------------------------------------------- 프로필 문장의 연락처 형식은 시작 전에 막는다 (이슈 #31, 정책 eligibility.md 16장)
+
+def with_contact_in_profile(monkeypatch, text):
+    real = rp.ev.load_fixtures
+
+    def load():
+        samples, profile, evidence, gates = real()
+        skills = [*profile.skills, text]
+        return samples, profile.model_copy(update={"skills": skills}), evidence, gates
+
+    monkeypatch.setattr(rp.ev, "load_fixtures", load)
+
+
+@pytest.mark.parametrize("text,kind", [("메일 hong.gildong@example.com", "이메일"), ("010-1234-5678", "전화번호"),
+                                       ("900101-1234567", "주민등록번호"), ("https://github.com/hong", "링크")])
+def test_a_contact_format_in_the_profile_stops_the_ai_run_before_the_notice_and_any_client(env, monkeypatch, capsys, text, kind):
+    with_contact_in_profile(monkeypatch, text)
+    monkeypatch.setattr(rp, "GeminiClient", lambda *a, **k: pytest.fail("연락처 형식이 있는데 클라이언트를 만들었다"))
+    with pytest.raises(SystemExit) as e:
+        rp.main([*CONSENT, "--postings", str(env.postings), "--gate-cases", str(env.gate_cases)])
+    cap = capsys.readouterr()
+    assert e.value.code == 2 and f"({kind})" in cap.err and "skills[" in cap.err
+    assert text not in cap.out + cap.err and "무료 티어" not in cap.out and cap.out == ""  # 안내 문구도 나오지 않는다
+    assert not (env.results / "llm_usage.jsonl").exists() and not (env.results / "pipeline").exists()

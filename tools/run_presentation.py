@@ -21,11 +21,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agents.application_writer import KINDS, ApplicationDraft, DraftError, make_writer_mock, write_application
+from agents.profile_analyzer import profile_payload
 from agents.task_linker import build_links, link_tasks
 from core.llm_client import MAX_RETRIES, GeminiClient, LLMClient, LLMQuotaExceeded, LLMStageError, UsageLog, format_timing, load_env
 from core.llm_mock import make_evidence_mock, make_extraction_mock
 from core.pipeline import ScenarioJob, run_pipeline
 from core.pipeline_run import PipelineRun
+from core.privacy import reject_contact_info
 from core.schemas import DISPLAY_LABELS, EligibilityProfile
 from core.selection import SelectionRefused, select_job
 from core.writer_input import WriterInputError, build_writer_input
@@ -543,7 +545,11 @@ def build_ai_plan(args) -> Plan:
     게이트 입력 파일이 없으면 안내 문구와 동의 점검에 들어가기 전에 멈춘다 (예산 계산에 필요하다).
     """
     demo_run_id = make_demo_run_id()
-    samples, _, _, _ = ev.load_fixtures()
+    samples, profile, _, _ = ev.load_fixtures()
+    try:  # 외부로 보내기 전에, 안내 문구보다 먼저: 프로필 문장 안의 연락처 형식 (정책 eligibility.md 16장)
+        reject_contact_info(profile_payload(profile))
+    except PermissionError as e:
+        raise AiSetupError(str(e)) from None
     ids = [s["job_id"] for s in samples]
     logical, gate_attempts, elig_attempts, judge_calls = gate_ai_budget(args, len(ids))  # 입력 파일이 없으면 ScenarioError, 샘플 6건 밖이면 AiSetupError
     writer_calls = 3 * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 + 연결 후보. 어떤 공고가 선택될지 호출 전에 모르므로 연결 후보는 항상 포함한다. 각각 재시도 포함
