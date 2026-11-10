@@ -18,6 +18,8 @@ KIND_OF_STAGE = {v: k for k, v in STAGE.items()}
 BASE_ENV = {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-base", "GEMINI_RPM": "15", "GEMINI_RPD": "500"}
 CONSENT = ["--ai", "--accept-free-tier-terms"]
 
+pytestmark = pytest.mark.usefixtures("typed")  # 선택 질문에 기본으로 "3"을 답한다(tests/conftest.py). 다른 모듈의 테스트는 영향을 받지 않는다
+
 
 def make_fake(errors=None, left=None):
     """GeminiClient 대신 쓰는 가짜. 호출은 log에 (모델, 단계, job_id)로 쌓고, 예산 점검은 budgets에 (모델, 필요한 호출)로 쌓는다.

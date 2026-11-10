@@ -14,6 +14,8 @@ from tools import run_demo as demo
 from tools import run_presentation as rp
 
 KINDS = ("cover_letter", "portfolio")
+
+pytestmark = pytest.mark.usefixtures("typed")  # 선택 질문에 기본으로 "3"을 답한다(tests/conftest.py). 다른 모듈의 테스트는 영향을 받지 않는다
 READ_LINE = rp.read_line  # conftest의 autouse가 바꾸기 전의 원래 함수
 
 
@@ -517,9 +519,27 @@ def test_read_line_returns_none_when_input_ends_or_cannot_be_read(monkeypatch):
     assert READ_LINE("질문") == "3"
 
 
-def test_a_piped_answer_is_echoed_after_the_question_but_a_typed_one_is_not(monkeypatch, capsys):
-    monkeypatch.setattr("builtins.input", lambda prompt="": "3")
+@pytest.mark.parametrize("rejected", ["sample-3", "abc", "SECRET-TEXT sample-3 abc", "", "9"])
+def test_only_the_accepted_number_is_echoed_for_piped_input_and_rejected_text_never_is(rdir, monkeypatch, capsys, typed, rejected):
     monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: False, raising=False)
-    assert READ_LINE("질문") == "3" and capsys.readouterr().out == "3\n"
+    typed.answers = [rejected, "3"]
+    result = rp.execute(plan_for())
+    out = capsys.readouterr().out
+    assert result.selected_job_id == "sample-3" and len(typed.prompts) == 2
+    assert rejected not in out.splitlines() or rejected == ""  # 거절한 입력이 따로 한 줄로 되풀이되지 않는다(공고 ID는 후보 줄 안에 있다)
+    if rejected not in ("", "sample-3", "9"):
+        assert rejected not in out and "SECRET-TEXT" not in out
+    assert out.count("후보에 있는 공고 번호(숫자)만 입력할 수 있다.") == 1
+    assert [line for line in out.splitlines() if line == "3"] == ["3"]  # 받아들인 번호 하나만 보인다
+
+
+def test_a_typed_answer_is_not_echoed(rdir, monkeypatch, capsys, typed):
     monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: True, raising=False)
-    assert READ_LINE("질문") == "3" and capsys.readouterr().out == ""
+    rp.execute(plan_for())
+    assert [line for line in capsys.readouterr().out.splitlines() if line == "3"] == []
+
+
+def test_read_line_itself_prints_nothing(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt="": "SECRET-TEXT")
+    monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: False, raising=False)
+    assert READ_LINE("질문") == "SECRET-TEXT" and capsys.readouterr().out == ""

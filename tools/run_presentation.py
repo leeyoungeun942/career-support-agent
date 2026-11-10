@@ -181,12 +181,9 @@ def candidates(run: PipelineRun, plan: Plan) -> tuple[list[Candidate], str | Non
 def read_line(prompt: str) -> str | None:
     """한 줄을 읽는다. 입력이 끝났거나 읽을 수 없으면 None. 테스트가 이 함수를 바꿔 끼운다."""
     try:
-        line = input(prompt)
+        return input(prompt)
     except (EOFError, OSError):
         return None
-    if not sys.stdin.isatty():  # 파이프로 받은 답은 화면에 보이지 않으므로 질문 뒤에 그대로 보여 준다(로그를 읽을 수 있게)
-        print(line, flush=True)
-    return line
 
 
 def ask_for_job(found: list[Candidate], notice: str | None = None) -> tuple[str | None, str | None]:
@@ -207,6 +204,8 @@ def ask_for_job(found: list[Candidate], notice: str | None = None) -> tuple[str 
             return None, "no_input"
         text = raw.strip()
         if re.fullmatch(r"[0-9]+", text) and int(text) in by_number:
+            if not sys.stdin.isatty():  # 파이프로 받은 답은 화면에 보이지 않으므로, 받아들인 번호만 질문 뒤에 보인다. 거절한 입력의 원문은 화면에 내지 않는다
+                print(int(text), flush=True)
             return by_number[int(text)], None
         left = SELECTION_ATTEMPTS - attempt - 1
         print("후보에 있는 공고 번호(숫자)만 입력할 수 있다." + (f" 남은 횟수 {left}회." if left else ""), flush=True)

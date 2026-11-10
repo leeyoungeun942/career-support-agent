@@ -83,8 +83,9 @@ class Typed:
         return self.answers.pop(0) if self.answers else None
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def typed(monkeypatch):
+    """run_presentation의 선택 질문에 답을 넣어 준다. 이 fixture를 쓰는 테스트(run_presentation을 실행하는 두 모듈은 pytestmark로 쓴다)만 영향을 받는다."""
     from tools import run_presentation
 
     box = Typed()
