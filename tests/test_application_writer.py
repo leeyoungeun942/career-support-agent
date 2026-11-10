@@ -18,6 +18,10 @@ POLICY = (Path(__file__).resolve().parents[1] / "docs" / "policies" / "applicati
 MOCK = json.loads(demo.WRITER_MOCK_JSON.read_text(encoding="utf-8"))
 MOCK_ANSWERS = {k: v for k, v in MOCK.items() if not k.startswith("_")}
 RUN = run()
+needs_gate_input = pytest.mark.skipif(
+    not demo.GATE_CASES_JSON.exists(),
+    reason="gate input unavailable: data/sample-jobs/gate_sample_cases.json (커밋하지 않는 파일, 팀 Drive에서 받아 넣는다)",
+)
 
 
 def writer_input(job_id="sample-3", profile=PROFILE, **kw):
@@ -679,6 +683,7 @@ def test_policy_documents_the_review_md():
 
 # ---------------------------------------------------------------- --task-links ai: 연결 후보 호출 1회가 초안 호출 앞에 붙는다 (정책 5장 D18)
 
+@needs_gate_input
 def test_task_links_ai_adds_one_call_before_the_draft_and_counts_it_in_the_budget(draft_ai, results, capsys):
     assert main(*AI, "--task-links", "ai", "--draft", "cover_letter") == 0
     client = draft_ai[0]
@@ -705,6 +710,7 @@ def test_task_links_none_is_the_default_and_sends_no_link_call(draft_ai, capsys)
     assert [r.stage for r in draft_ai[0].requests] == ["write_cover_letter"]
 
 
+@needs_gate_input
 def test_links_only_makes_one_link_call_shows_the_links_and_writes_no_draft(draft_ai, results, capsys):
     assert main(*AI, "--task-links", "ai", "--links-only", "--draft", "cover_letter") == 0
     out = capsys.readouterr().out
