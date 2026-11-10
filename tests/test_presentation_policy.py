@@ -66,6 +66,7 @@ def test_the_budget_numbers_in_the_policy_follow_the_retry_constant():
     budget = section("## 5. 호출 예산", "## 6.")
     for number in (gate, eligibility, gate + eligibility, gate + eligibility + cover + portfolio, gate + eligibility + cover + portfolio + link, cover + portfolio, cover + portfolio + link):
         assert str(number) in budget, number  # 84, 48, 132, 140, 144, 8, 12
+    assert "항상 포함" in budget and cover + portfolio + link == 12 and gate + eligibility + 12 == 144  # --ai는 연결 후보를 항상 예산에 넣는다 (이슈 #28)
 
 
 def test_the_usage_task_mapping_in_the_policy_matches_the_code():
@@ -75,8 +76,9 @@ def test_the_usage_task_mapping_in_the_policy_matches_the_code():
     assert {STAGE_TASKS[s] for s in (*WRITER_STAGE.values(), task_linker.STAGE)} == {"writer"} and "→ `writer`" in row[1] and "→ `other`" in row[1]
 
 
-def test_the_fixed_scenario_in_the_policy_is_the_one_in_the_code():
-    table = section("## 2. 발표 시나리오 (고정)", "**자동 대체를 하지 않는다.**")
-    assert f"`{rp.PRESENTATION_JOB_ID}` 고정" in table and "sample-3" == rp.PRESENTATION_JOB_ID
+def test_the_scenario_in_the_policy_is_the_one_in_the_code():
+    table = section("## 2. 발표 시나리오와 공고 선택", "**자동 대체를 하지 않는다.**")
+    assert "자동 선택은 없다" in table and "--scenario full-ai-demo" in table
+    assert rp.PRESENTATION_JOB_ID == "sample-3"  # 기대 순위 확인과 mock 후보 제한의 기준이다. 선택은 사용자가 한다
     assert rp.EXPECTED_RANKING == ["sample-3", "sample-1", "sample-4", "sample-5", "sample-2", "sample-6"]
-    assert "--scenario full-ai-demo" in table
+    assert "mock의 후보는 `sample-3`뿐" in DOC and "`--select`" not in table

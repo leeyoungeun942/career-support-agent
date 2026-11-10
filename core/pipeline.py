@@ -6,7 +6,7 @@ run_pipeline은 공고 여러 건을 게이트 -> 자격요건 -> 정렬로 돌�
 import hashlib
 import json
 import secrets
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -105,6 +105,7 @@ def run_pipeline(
     evidence_client: LLMClient, *, desired_family: str | None = None, gate_judge: AiJudge | None = None,
     gate_client: LLMClient | None = None, allow_external_profile: bool = False, usage: UsageLog | None = None,
     cache_mode: str = "memory", now: datetime | None = None, run_id: str | None = None,
+    on_progress: Callable[[str, int, int, str, str], None] | None = None,
 ) -> PipelineRun:
     """공고들을 게이트와 자격요건으로 평가하고 정렬해 PipelineRun을 돌려준다. 점수는 계산하지 않는다 (정책 14장).
 
@@ -116,8 +117,13 @@ def run_pipeline(
       남은 공고의 게이트도 자격요건도 시작하지 않는다(앞 공고는 게이트 결과를 남기고 not_run). 판정 함수의 결함(TypeError 등)은 숨기지 않고 그대로 올린다 (data-contract 3-3).
     - 입력 자체가 틀린 것(같은 job_id, 주입한 게이트의 job_id 불일치, 게이트 실행에 필요한 인자 없음, 두 클라이언트의 모델 불일치)은
       공고별 상태가 아니라 실행 거부(ValueError)다. PermissionError(외부 클라이언트에 허용 없이 프로필을 보냄)도 그대로 올린다.
+    - on_progress(stage, done, total, job_id, status)가 있으면 공고 한 건의 해당 단계가 끝날 때마다 부른다(정책 presentation.md 3-1). stage는 "gate" 또는
+      "eligibility", total은 입력 공고 수, done은 그 단계의 입력 순서 순번(1부터), status는 completed/failed/not_run이다. 게이트는 모든 공고에 먼저, 자격요건은 그다음이라
+      공고마다 두 번 알린다. 주입한 게이트 결과의 공고는 게이트 알림이 없다. 알림은 결과를 바꾸지 못하고, 콜백의 예외는 잡지 않는다. 없으면 동작이 같다.
     - 게이트 detail은 비운다. detail에는 공고 업무 항목 원문이 들어 있어 실행 결과에 공고 원문을 남기지 않는다는 규칙과 맞지 않는다.
     """
+    notify = on_progress or (lambda *_: None)
+    total = len(jobs)
     ids = [j.job_id for j in jobs]
     if dupes := sorted({i for i in ids if ids.count(i) > 1}):
         raise ValueError(f"같은 job_id가 둘 이상 있다: {dupes}")
@@ -146,18 +152,20 @@ def run_pipeline(
     gate_ended: dict[str, tuple[str, str]] = {}  # 게이트 결과 없이 끝난 공고 -> (평가 상태, 실패 코드)
     gate_stopped = False  # 게이트 단계에서 한도가 소진됐다
     dic = None if all(injected) else Dictionary()
-    for job in jobs:
-        if job.gate is not None:  # 주입한 결과도 실행한 결과와 같이 detail(공고 업무 항목 원문)을 비운다
+    for position, job in enumerate(jobs, start=1):
+        if job.gate is not None:  # 주입한 결과도 실행한 결과와 같이 detail(공고 업무 항목 원문)을 비운다. 게이트를 부르지 않으므로 알림도 없다
             gates[job.job_id] = job.gate.model_copy(update={"detail": None})
             continue
         gates[job.job_id] = None
         if gate_stopped:  # 한도가 소진됐으면 남은 공고의 게이트는 입력 검사도 하지 않고 시작하지 않는다
             gate_ended[job.job_id] = ("not_run", "quota_exhausted")
+            notify("gate", position, total, job.job_id, "not_run")
             continue
         try:
             _check_gate_posting(job.gate_posting)
         except GateInputError:  # 입력 오류만 공고별 실패로 남긴다. 메시지는 옮기지 않는다
             gate_ended[job.job_id] = ("failed", "input_invalid")
+            notify("gate", position, total, job.job_id, "failed")
             continue
         try:
             gates[job.job_id] = judge_posting(job.job_id, job.gate_posting, desired_family, job.gate_judge or gate_judge, dic, with_detail=False)
@@ -165,11 +173,12 @@ def run_pipeline(
             gate_ended[job.job_id], gate_stopped = ("failed", "quota_exhausted"), True
         except LLMStageError:
             gate_ended[job.job_id] = ("failed", "gate_failed")
+        notify("gate", position, total, job.job_id, "failed" if job.job_id in gate_ended else "completed")
 
     entries: dict[str, dict] = {}
     done: list[tuple[str, EligibilityResult]] = []
     stopped = False
-    for job in jobs:
+    for position, job in enumerate(jobs, start=1):
         gate = gates[job.job_id]
         base = {"job_id": job.job_id, "job_label": job.job_label, "gate": gate}
         if job.job_id in gate_ended:
@@ -186,6 +195,7 @@ def run_pipeline(
             else:
                 entries[job.job_id] = {**base, "evaluation_status": "completed", "eligibility": result}
                 done.append((job.job_id, result))
+        notify("eligibility", position, total, job.job_id, entries[job.job_id]["evaluation_status"])
 
     ranked = rank_jobs([r for _, r in done], [gates[i] for i, _ in done])
     for position, result in enumerate(ranked, start=1):

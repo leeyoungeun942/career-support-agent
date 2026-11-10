@@ -18,6 +18,8 @@ KIND_OF_STAGE = {v: k for k, v in STAGE.items()}
 BASE_ENV = {"GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-base", "GEMINI_RPM": "15", "GEMINI_RPD": "500"}
 CONSENT = ["--ai", "--accept-free-tier-terms"]
 
+pytestmark = pytest.mark.usefixtures("typed")  # 선택 질문에 기본으로 "3"을 답한다(tests/conftest.py). 다른 모듈의 테스트는 영향을 받지 않는다
+
 
 def make_fake(errors=None, left=None):
     """GeminiClient 대신 쓰는 가짜. 호출은 log에 (모델, 단계, job_id)로 쌓고, 예산 점검은 budgets에 (모델, 필요한 호출)로 쌓는다.
@@ -81,10 +83,10 @@ def usage_rows(env):
     return [json.loads(line) for line in (env.results / "llm_usage.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
-def budget(env, writer_extra=0):
+def budget(env):
     args = type("A", (), {"gate_cases": str(env.gate_cases)})()
     logical, gate_attempts, elig_attempts, judge_calls = ds.gate_ai_budget(args, 6)
-    return judge_calls, (2 + writer_extra) * (1 + MAX_RETRIES)
+    return judge_calls, 3 * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 + 연결 후보: 무엇이 선택될지 모르므로 연결 후보를 항상 포함한다 (정책 5장)
 
 
 # ---------------------------------------------------------------- 아무것도 보내기 전의 거부
@@ -205,11 +207,16 @@ def test_either_model_being_short_stops_the_run_before_any_call(env, monkeypatch
     assert "시작하지 않았다" in capsys.readouterr().err and log == [] and len(budgets) == 2  # 두 모델을 모두 점검했고 호출은 없다
 
 
-def test_writer_boundary_is_exactly_eight_attempts(env, monkeypatch):
+def test_writer_boundary_is_exactly_twelve_attempts_even_when_the_fixture_links_are_used(env, monkeypatch):
     two_models(env)
     _, writer_calls = budget(env)
-    assert writer_calls == 2 * (1 + MAX_RETRIES) == 8
-    Fake, log, _ = make_fake(left={"m-writer": 8})
+    assert writer_calls == 3 * (1 + MAX_RETRIES) == 12
+    Fake, log, _ = make_fake(left={"m-writer": 11})
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    with pytest.raises(SystemExit) as e:  # 11회만 남았으면 고정본만 쓰는 실행이라도 시작하지 않는다
+        rp.main([*CONSENT, "--postings", str(env.postings), "--gate-cases", str(env.gate_cases)])
+    assert e.value.code == 2 and log == []
+    Fake, log, _ = make_fake(left={"m-writer": 12})
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 0
 
@@ -225,12 +232,11 @@ def test_no_automatic_fallback_a_failed_writer_call_is_not_retried_on_the_judge_
     assert "[6] 자기소개서: 실패" in cap.out and "[7] 포트폴리오: 완료" in cap.out and "SECRET-DETAIL" not in cap.out + cap.err
 
 
-def test_ai_task_links_use_the_writer_model_and_add_one_attempt_budget(env, monkeypatch):
+def test_ai_task_links_use_the_writer_model(env, monkeypatch):
     two_models(env)
     Fake, log, budgets = make_fake()
     monkeypatch.setattr(rp, "GeminiClient", Fake)
-    _, writer_calls = budget(env, writer_extra=1)
-    assert writer_calls == 3 * (1 + MAX_RETRIES) == 12
+    _, writer_calls = budget(env)
     assert run(env, "--task-links", "ai") == 0
     assert ("m-writer", writer_calls) in budgets
     assert [(m, s) for m, s, _ in log if s == "link_tasks"] == [("m-writer", "link_tasks")]
@@ -253,7 +259,7 @@ def test_a_gate_failure_of_sample_3_stops_the_demo_without_calling_the_writer(en
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 4
     out = capsys.readouterr().out
-    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (gate_failed)" in out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (invalid_input)" in out  # sample-3은 후보가 아니라 입력한 3번이 거절된다(다른 공고로 바꾸지 않는다)
     assert not any(s.startswith("write_") for _, s, _ in log)
     assert "sample-3" not in [line for line in out.splitlines() if line.startswith("순위")] and (env.results / "pipeline").exists()  # 순위 결과는 저장돼 있다
     assert not (env.results / "drafts").exists()
@@ -276,7 +282,7 @@ def test_an_eligibility_failure_of_sample_3_stops_the_demo(env, monkeypatch, cap
     Fake, log, _ = make_fake({"find_evidence": LLMStageError("x")})  # 모든 공고의 근거 찾기가 실패한다
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 4
-    assert "[4] 선택 공고: sample-3 - 공고 선택: 실패 (stage_failed)" in capsys.readouterr().out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_candidate)" in capsys.readouterr().out
     assert not any(s.startswith("write_") for _, s, _ in log)
 
 
@@ -373,3 +379,123 @@ def test_a_different_actual_model_is_marked_as_a_mismatch_and_an_unknown_one_is_
     assert "모델 요청 m-a / 실제 m-b (불일치)" in gate
     assert not any("불일치" in l for l in lines if l is not gate)
     assert any("실제 알 수 없음)" in l for l in lines)
+
+
+# ---------------------------------------------------------------- 사용자 공고 선택: 선택 공고가 뒤 단계를 모두 따라간다 (이슈 #28, 정책 2-1)
+
+def spy_selection(monkeypatch):
+    """select_job, job_info, build_writer_input이 받은 공고를 기록한다(동작은 그대로)."""
+    seen = {"select": [], "info": [], "writer_input": []}
+    real_select, real_info, real_wi = rp.select_job, rp.job_info, rp.build_writer_input
+
+    def select(run, job_id, **kw):
+        seen["select"].append((job_id, kw.get("posting_ref")))
+        return real_select(run, job_id, **kw)
+
+    def info(job_id, *a, **kw):
+        seen["info"].append(job_id)
+        return real_info(job_id, *a, **kw)
+
+    def writer_input(selected, *a, **kw):
+        seen["writer_input"].append(selected.job_id)
+        return real_wi(selected, *a, **kw)
+
+    monkeypatch.setattr(rp, "select_job", select)
+    monkeypatch.setattr(rp, "job_info", info)
+    monkeypatch.setattr(rp, "build_writer_input", writer_input)
+    return seen
+
+
+def test_the_chosen_job_is_used_everywhere_after_the_selection(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})  # sample-1의 초안 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    seen = spy_selection(monkeypatch)
+    typed.answers = ["1"]
+    assert run(env, "--task-links", "none") == 1  # 초안 단계 실패(가짜 응답 없음)라 1이고, 선택 이후는 sample-1을 따라갔다
+    out = capsys.readouterr().out
+    assert [(j, ref.endswith("#sample-1") if ref else ref) for j, ref in seen["select"]] == [("sample-1", True)]
+    assert seen["info"] == ["sample-1"] and seen["writer_input"] == ["sample-1"]
+    assert {job for _, stage, job in log if stage.startswith("write_")} == {"sample-1"}  # 초안 요청의 job_id
+    assert "[4] 공고 선택: 완료 (sample-1)" in out and "[4] 선택 공고: sample-1 - 공고 선택: 완료" in out
+
+
+def test_the_default_answer_in_tests_still_gives_the_old_sample_3_run(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    seen = spy_selection(monkeypatch)
+    assert run(env) == 0
+    assert seen["info"] == ["sample-3"] and "[4] 선택 공고: sample-3 - 공고 선택: 완료" in capsys.readouterr().out
+    assert len(typed.prompts) == 1
+
+
+def test_the_candidate_list_is_shown_and_wrong_answers_are_asked_again(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})  # sample-1의 초안 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["sample-1", "9", "1"]  # 가짜 게이트는 모든 공고를 같은 그룹으로 만들어 후보가 여럿이다
+    run(env, "--task-links", "none")
+    out = capsys.readouterr().out
+    assert "[sample-3] 3번" in out and "[sample-1] 1번" in out and len(typed.prompts) == 3
+    assert "남은 횟수 2회." in out and "남은 횟수 1회." in out and "[sample-3] 3번" in out
+    assert "[4] 공고 선택: 완료 (sample-1)" in out
+
+
+def test_with_the_fixture_chosen_only_sample_3_can_be_picked_in_ai_mode(env, monkeypatch, capsys, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1", "3"]
+    assert run(env, "--task-links", "fixture") == 0
+    out = capsys.readouterr().out
+    assert "연결 후보 고정본은 sample-3에만 있어" in out and "[4] 공고 선택: 완료 (sample-3)" in out and len(typed.prompts) == 2
+
+
+def test_the_selection_prompt_does_not_touch_the_network_or_the_usage_log_before_the_pipeline_is_done(env, monkeypatch, typed):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    calls_at_prompt = []
+    typed.answers = []
+    original = rp.read_line
+
+    def spy(prompt):
+        calls_at_prompt.append(len(log))
+        return None
+
+    monkeypatch.setattr(rp, "read_line", spy)
+    assert run(env) == 4
+    assert calls_at_prompt and calls_at_prompt[0] > 0  # 평가 호출이 모두 끝난 뒤에 묻는다
+    assert not any(s.startswith("write_") for _, s, _ in log) and original is not None
+
+
+# ---------------------------------------------------------------- 연결 후보의 기본(자동): sample-3은 고정본, 그 외 공고는 AI (정책 2장, 5장)
+
+def test_auto_task_links_use_the_fixture_for_sample_3_and_no_link_call(env, monkeypatch):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    assert run(env) == 0
+    assert "link_tasks" not in [s for _, s, _ in log]
+
+
+def test_auto_task_links_ask_the_writer_model_for_another_job(env, monkeypatch, typed):
+    two_models(env)
+    Fake, log, _ = make_fake({"link_tasks": LLMStageError("x")})  # sample-1의 연결 후보 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1"]
+    assert run(env) == 1
+    assert [(m, s, j) for m, s, j in log if s == "link_tasks"] == [("m-writer", "link_tasks", "sample-1")]  # WRITER 모델이 선택 공고의 연결 후보를 만든다
+    assert not any(s.startswith("write_") for _, s, _ in log)  # 연결 후보가 실패하면 초안을 만들지 않는다
+
+
+def test_an_explicit_none_gives_no_link_call_for_any_job(env, monkeypatch, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1"]
+    run(env, "--task-links", "none")
+    assert "link_tasks" not in [s for _, s, _ in log]
+
+
+def test_the_notice_names_twelve_writer_attempts_and_the_new_total(env, monkeypatch, capsys):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    run(env)
+    judge_calls, writer_calls = budget(env)
+    out = capsys.readouterr().out
+    assert f"WRITER {writer_calls}회" in out and f"합계 {judge_calls + writer_calls}회" in out and writer_calls == 12
