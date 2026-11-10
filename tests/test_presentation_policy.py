@@ -75,8 +75,9 @@ def test_the_usage_task_mapping_in_the_policy_matches_the_code():
     assert {STAGE_TASKS[s] for s in (*WRITER_STAGE.values(), task_linker.STAGE)} == {"writer"} and "→ `writer`" in row[1] and "→ `other`" in row[1]
 
 
-def test_the_fixed_scenario_in_the_policy_is_the_one_in_the_code():
-    table = section("## 2. 발표 시나리오 (고정)", "**자동 대체를 하지 않는다.**")
-    assert f"`{rp.PRESENTATION_JOB_ID}` 고정" in table and "sample-3" == rp.PRESENTATION_JOB_ID
+def test_the_scenario_in_the_policy_is_the_one_in_the_code():
+    table = section("## 2. 발표 시나리오와 공고 선택", "**자동 대체를 하지 않는다.**")
+    assert "자동 선택은 없다" in table and "--scenario full-ai-demo" in table
+    assert rp.PRESENTATION_JOB_ID == "sample-3"  # 기대 순위 확인과 mock 후보 제한의 기준이다. 선택은 사용자가 한다
     assert rp.EXPECTED_RANKING == ["sample-3", "sample-1", "sample-4", "sample-5", "sample-2", "sample-6"]
-    assert "--scenario full-ai-demo" in table
+    assert "mock의 후보는 `sample-3`뿐" in DOC and "`--select`" not in table
