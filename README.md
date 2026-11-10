@@ -4,7 +4,7 @@
 
 LLM(Gemini)은 정해진 형식의 판정 재료와 초안 문장만 만든다. **점수, 판정 형식 변환, 순위 정렬은 코드가 한다.** 모델의 출력은 코드가 다시 검증한다.
 
-> 현재 범위(MVP): 가상 프로필(김하늘) 1명과 샘플 채용공고 6건. 실제 지원자 프로필과 임의 공고 입력은 아직 지원하지 않는다(이슈 #31).
+> 현재 범위(MVP): 가상 프로필(김하늘, `tests/fixtures/eligibility_sample_expected.json`) 1명과 샘플 채용공고 6건. 실제 지원자 프로필과 임의 공고 입력은 아직 지원하지 않는다(이슈 #31).
 
 ## 파이프라인
 
@@ -22,6 +22,24 @@ LLM(Gemini)은 정해진 형식의 판정 재료와 초안 문장만 만든다. 
 - 모델은 **두 역할**로 나뉜다. JUDGE(판정)는 게이트·자격요건, WRITER(생성)는 자소서·포트폴리오다. 같은 모델을 써도 되고 따로 정해도 된다. 한쪽이 실패해도 다른 모델로 자동 대체하지 않는다.
 - 평가가 끝나지 않은 공고는 순위에 넣지 않고 "평가하지 못한 공고"로 따로 보인다.
 - 적합성 점수(`agents/fit_evaluator.py`, `docs/policies/fit-evaluation.md`)는 아직 구현하지 않았다. 지금 순위는 점수 없이 정해진다.
+
+## LLM 호출 구조
+
+오케스트레이터(`tools/run_presentation.py`의 `execute`)가 단계를 정해진 순서로 호출한다. 각 단계의 응답은 코드가 검증한 뒤에만 다음 단계로 넘어간다.
+
+| 순서 | 단계(LLM 단계명) | 모델 | 호출 수(샘플 6건) | 코드가 하는 검증 |
+|---|---|---|---|---|
+| 1 | 직무 게이트(`gate_label`) | JUDGE | 약 20 (규칙이 못 정한 하위 업무마다 1회) | 허용된 라벨인지. 이유에 공고 문장이 그대로 옮겨지면 고정 문구로 바꾼다 |
+| 2 | 요건 추출(`extract_requirements`) | JUDGE | 6 (공고당 1) | 형식과 요건 구조 |
+| 3 | 근거 찾기(`find_evidence`) | JUDGE | 5 (공고당 0~1) | 인용이 프로필 원문에 있는지. 판정(met / not_met)은 코드 |
+| 4 | 순위 | 없음 | 0 | 전부 코드: 직무 그룹 → 자격요건 판정 → 입력 순서 |
+| 5 | 업무 연결 후보(`link_tasks`) | WRITER | 0~1 (`sample-3`은 고정본이라 0, 그 외 공고는 AI 1회) | 인용이 프로필 원문에 있는지 |
+| 6 | 자기소개서(`write_cover_letter`) | WRITER | 1 | 사실 id, 숫자, 영문 이름이 근거에 있는지 |
+| 7 | 포트폴리오(`write_portfolio`) | WRITER | 1 | 같음 |
+
+- 호출은 `CachedClient`가 감싸 캐시, 재시도(최대 3회), 사용량 기록(`data/results/llm_usage.jsonl`)을 한다. 모델 자동 대체는 없다.
+- 시작 전에 모델별 최대 호출 수(재시도 포함)를 오늘 남은 한도와 비교해, 모자라면 한 번도 부르지 않고 멈춘다.
+- 호출 구조의 숫자와 근거는 `docs/policies/presentation.md` 5장에 있다.
 
 ## 빠른 시작
 
@@ -95,7 +113,7 @@ python -m pytest
 ### 먼저 알아 둘 것
 
 - **무료 티어로 보낸 입력은 공급자가 제품 개선에 쓰고 사람이 읽을 수 있다.** 그래서 이 프로젝트는 **가상 프로필과 샘플 공고만** 보낸다. 실제 지원자 정보, 실명, 연락처, 주소를 프로필에 넣지 않는다. 결제 계정은 연결하지 않는다.
-- 프로필 문장에 이메일·전화번호·주민등록번호·링크 형식이 있으면 코드가 호출 전에 멈춘다. 실명과 주소는 형식으로 구분할 수 없어 검사하지 못하니 직접 조심한다.
+- (PR #36 병합 후) 프로필 문장에 이메일·전화번호·주민등록번호·링크 형식이 있으면 코드가 호출 전에 멈춘다. 실명과 주소는 형식으로 구분할 수 없어 검사하지 못하니 직접 조심한다.
 - `--ai`는 **샘플 공고 원문 파일 두 개**가 있어야 시작한다. 이 파일들은 저작권·약관 문제로 저장소에 올리지 않았다(아래 "데이터").
 
 ### 1. 키 넣기
@@ -122,6 +140,7 @@ data/sample-jobs/eligibility_sample_postings.json
 ```
 - 두 파일 모두 샘플 6건(`sample-1`~`sample-6`)이 있어야 한다. 회사명이 `tests/fixtures/job_gate_sample_expected.json`의 기대 판정과 같고 게이트 입력의 직무명이 공고 원문에 들어 있어야 한다. 어긋나면 호출 전에 거부한다.
 - 형식: `eligibility_sample_postings.json`은 `{"postings": {"sample-1": {"text": "..."}, ... "sample-6": {...}}}`, `gate_sample_cases.json`은 `{"desired_family": "...", "cases": [{"no", "company", "job_title", "position", "items": [...]}]}`.
+- **샘플 공고 원문은 Google Drive를 통해 제출한다.** 저장소에는 올리지 않으므로, 저장소만 받은 외부 사용자는 mock 실행까지만 재현할 수 있다.
 - 파일이 없으면 `--ai`는 "공고 원문 파일이 없다"로 멈추고 아무것도 보내지 않는다. mock 실행은 이 파일 없이도 동작한다.
 
 ### 3. 실행
@@ -159,7 +178,7 @@ python -m tools.run_presentation --ai --accept-free-tier-terms
 |---|---|
 | 0 | 모두 완료 |
 | 1 | 끝까지 갔지만 실패한 단계가 있음(예: 한 공고의 평가 실패, 초안 한 건 실패) |
-| 2 | 시작하지 않음(동의 없음, 키·설정 오류, 입력 파일 없음, 호출 예산 부족, 프로필에 연락처 형식). 호출 0회 |
+| 2 | 시작하지 않음(동의 없음, 키·설정 오류, 입력 파일 없음, 호출 예산 부족, 프로필에 연락처 형식 — PR #36 병합 후). 호출 0회 |
 | 3 | 호출 한도 소진으로 멈춤. 태평양 시간 자정 이후에 이어서 한다 |
 | 4 | 한도와 무관한 중단(공고 선택 실패: 입력 3회 오류·입력 없음·후보 없음, 저장·재로딩 검증 실패) |
 
@@ -197,14 +216,14 @@ python -m tools.run_presentation --ai --accept-free-tier-terms
 
 | 폴더 | 내용 |
 |---|---|
-| `core/` | 스키마, 규칙(`rules.py`), 파이프라인, 선택, 초안 입력(`writer_input.py`), LLM 클라이언트와 캐시·사용량 기록, 프라이버시 검사 |
+| `core/` | 스키마, 규칙(`rules.py`), 파이프라인, 선택, 초안 입력(`writer_input.py`), LLM 클라이언트와 캐시·사용량 기록, 프라이버시 검사(`privacy.py`, PR #36 병합 후) |
 | `agents/` | 공고 분석, 프로필 분석, 업무 연결 후보(`task_linker.py`), 지원서 작성. `fit_evaluator.py`(적합성 점수)는 아직 비어 있다 |
 | `tools/` | 실행 도구. `run_presentation.py`(통합 실행), `run_demo.py`, 평가 스크립트(`eval_gate.py`, `eval_eligibility.py`) |
 | `prompts/` | Agent 지시문(게이트, 요건 추출, 근거 찾기, 연결 후보, 자소서, 포트폴리오) |
 | `docs/policies/` | 정책 문서(아래) |
 | `docs/` | `data-contract.md`(Agent끼리 주고받는 형식), `project-guide.md`(프로젝트 지침) |
 | `data/` | 공고·프로필 데이터와 실행 결과. 원문과 결과는 git 제외 |
-| `tests/` | 테스트와 fixture(가상 프로필, 기대 판정) |
+| `tests/` | 테스트와 fixture. **김하늘 가상 프로필**은 `tests/fixtures/eligibility_sample_expected.json`의 `profile` 항목이며 저장소에 있다 |
 
 ## 정책 문서
 
@@ -221,7 +240,7 @@ python -m tools.run_presentation --ai --accept-free-tier-terms
 
 ## 데이터
 
-- 공고 원문(`data/raw/`, `data/sample-jobs/`)은 저작권·약관 문제로 저장소에 올리지 않는다. `data/raw/README.md`를 참고한다.
+- 공고 원문(`data/raw/`, `data/sample-jobs/`)은 저작권·약관 문제로 저장소에 올리지 않는다. **샘플 공고 원문은 Google Drive를 통해 제출한다.** `data/raw/README.md`를 참고한다.
 - 실행 결과(`data/results/`: 순위 결과, 초안, 캐시, 사용량 기록)에는 프로필 인용이 들어 있어 커밋하지 않는다.
 - `.env`, 지원자 개인정보도 커밋하지 않는다.
 
