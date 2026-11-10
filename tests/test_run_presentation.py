@@ -515,3 +515,11 @@ def test_read_line_returns_none_when_input_ends_or_cannot_be_read(monkeypatch):
         assert READ_LINE("질문") is None
     monkeypatch.setattr("builtins.input", lambda prompt="": "3")
     assert READ_LINE("질문") == "3"
+
+
+def test_a_piped_answer_is_echoed_after_the_question_but_a_typed_one_is_not(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt="": "3")
+    monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: False, raising=False)
+    assert READ_LINE("질문") == "3" and capsys.readouterr().out == "3\n"
+    monkeypatch.setattr(rp.sys.stdin, "isatty", lambda: True, raising=False)
+    assert READ_LINE("질문") == "3" and capsys.readouterr().out == ""

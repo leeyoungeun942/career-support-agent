@@ -181,9 +181,12 @@ def candidates(run: PipelineRun, plan: Plan) -> tuple[list[Candidate], str | Non
 def read_line(prompt: str) -> str | None:
     """한 줄을 읽는다. 입력이 끝났거나 읽을 수 없으면 None. 테스트가 이 함수를 바꿔 끼운다."""
     try:
-        return input(prompt)
+        line = input(prompt)
     except (EOFError, OSError):
         return None
+    if not sys.stdin.isatty():  # 파이프로 받은 답은 화면에 보이지 않으므로 질문 뒤에 그대로 보여 준다(로그를 읽을 수 있게)
+        print(line, flush=True)
+    return line
 
 
 def ask_for_job(found: list[Candidate], notice: str | None = None) -> tuple[str | None, str | None]:
