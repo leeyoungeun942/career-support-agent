@@ -117,7 +117,7 @@ class Plan:
     gate_client: LLMClient | None = None
     usage: UsageLog | None = None
     gate_cases: Path | None = None
-    task_links: str = "fixture"
+    task_links: str = "auto"        # auto(sample-3은 고정본, 그 외는 AI) / fixture(후보를 sample-3로 제한) / ai / none (정책 presentation.md 2장)
     cache_mode: str = "memory"
     models: dict[str, str] = field(default_factory=dict)
     limits: dict[str, int] = field(default_factory=dict)   # 모델 -> 일일 한도
@@ -141,9 +141,10 @@ def _fail(step: Step, code: str) -> None:
 
 def _task_links(plan: Plan, selected, info, job_id: str):
     """--task-links에 따라 업무 연결 후보를 만든다. none은 없음, fixture는 사람이 확정한 합성 고정본, ai는 호출 1회(WRITER 모델)."""
-    if plan.task_links == "none":
+    mode = plan.task_links if plan.task_links != "auto" else ("fixture" if job_id == PRESENTATION_JOB_ID else "ai")  # 고정본은 sample-3에만 있다
+    if mode == "none":
         return []
-    if plan.task_links == "fixture":
+    if mode == "fixture":
         entry = {k: v for k, v in json.loads(TASK_LINKS_JSON.read_text(encoding="utf-8")).items() if not k.startswith("_")}.get(job_id)
         if entry is None:
             raise WriterInputError("고정된 업무 연결 후보가 없다")
@@ -475,7 +476,7 @@ def build_mock_plan(args) -> Plan:
     return Plan(
         mode="mock", demo_run_id=make_demo_run_id(), jobs=jobs, profile=profile, desired_family=desired,
         extract_client=make_extraction_mock(samples), evidence_client=make_evidence_mock(samples, evidence),
-        writer_client=make_writer_mock(answers), results_dir=RESULTS_DIR, gate_cases=Path(args.gate_cases), task_links=args.task_links,
+        writer_client=make_writer_mock(answers), results_dir=RESULTS_DIR, gate_cases=Path(args.gate_cases), task_links=args.task_links or "auto",
         posting_ref="synthetic-posting:{job_id} (fixture에서 만든 합성 공고, 실제 원문이 아니다)", numbers=_job_numbers(),
     )
 
@@ -487,8 +488,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ai", action="store_true", help="실제 Gemini로 실행 (가상 프로필과 샘플 공고만)")
     p.add_argument("--accept-free-tier-terms", action="store_true", help="무료 티어 입력이 제품 개선에 쓰일 수 있음에 동의")
     p.add_argument("--scenario", choices=("full-ai-demo",), default="full-ai-demo", help="발표 시나리오 (선택지는 하나: 김하늘, 샘플 6건, 사용자가 고른 공고, 자소서 + 포트폴리오)")
-    p.add_argument("--task-links", choices=("none", "fixture", "ai"), default="fixture",
-                   help="초안에 쓸 업무 연결 후보. fixture=사람이 확정한 합성 고정본(기본), ai=연결 후보 호출 1회(--ai일 때만), none=없음")
+    p.add_argument("--task-links", choices=("none", "fixture", "ai"), default=None,
+                   help="초안에 쓸 업무 연결 후보. 기본(자동)=sample-3은 사람이 확정한 합성 고정본, 그 외 공고는 AI(호출 1회). "
+                        "fixture=고정본만(후보가 sample-3로 제한됨), ai=항상 AI(--ai일 때만), none=없음")
     p.add_argument("--gate-cases", default=str(GATE_CASES_JSON), help="게이트 입력 JSON 경로")
     p.add_argument("--postings", default=str(ev.POSTINGS_JSON), help="공고 원문 JSON 경로 (--ai)")
     p.add_argument("--fresh-cache", action="store_true", help="이번 실행만의 새 캐시를 쓴다")
@@ -539,7 +541,7 @@ def build_ai_plan(args) -> Plan:
     samples, _, _, _ = ev.load_fixtures()
     ids = [s["job_id"] for s in samples]
     logical, gate_attempts, elig_attempts, judge_calls = gate_ai_budget(args, len(ids))  # 입력 파일이 없으면 ScenarioError, 샘플 6건 밖이면 AiSetupError
-    writer_calls = (2 + (1 if args.task_links == "ai" else 0)) * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 (+ 연결 후보), 각각 재시도 포함
+    writer_calls = 3 * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 + 연결 후보. 어떤 공고가 선택될지 호출 전에 모르므로 연결 후보는 항상 포함한다. 각각 재시도 포함
     notice = ev.FREE_TIER_NOTICE + (
         f"\n예상 호출(최대 시도, 재시도 {MAX_RETRIES}회 포함): JUDGE 게이트 최대 논리 {logical}회(시도 {gate_attempts}) + 자격요건 {elig_attempts} = {judge_calls}회, "
         f"WRITER {writer_calls}회. 두 역할이 같은 모델이면 합계 {judge_calls + writer_calls}회를 그 모델의 남은 한도와 비교한다. 게이트는 공고의 업무 문장만 보낸다.")
@@ -563,7 +565,7 @@ def build_ai_plan(args) -> Plan:
     return Plan(
         mode="ai", demo_run_id=demo_run_id, jobs=jobs, profile=profile, desired_family=desired,
         extract_client=roles.judge.client, evidence_client=roles.judge.client, writer_client=roles.writer.client, results_dir=RESULTS_DIR,
-        gate_client=gate_client, usage=roles.usage, gate_cases=Path(args.gate_cases), task_links=args.task_links,
+        gate_client=gate_client, usage=roles.usage, gate_cases=Path(args.gate_cases), task_links=args.task_links or "auto",
         cache_mode="fresh" if args.fresh_cache else ("disk" if args.cache_profile else "memory"),
         models={"judge": judge.model, "writer": writer.model}, limits={judge.model: judge.rpd, writer.model: writer.rpd},
         posting_ref=f"{postings_file.as_posix()}#{{job_id}}", numbers=_job_numbers(),

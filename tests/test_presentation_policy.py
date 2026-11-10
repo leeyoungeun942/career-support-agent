@@ -66,6 +66,7 @@ def test_the_budget_numbers_in_the_policy_follow_the_retry_constant():
     budget = section("## 5. 호출 예산", "## 6.")
     for number in (gate, eligibility, gate + eligibility, gate + eligibility + cover + portfolio, gate + eligibility + cover + portfolio + link, cover + portfolio, cover + portfolio + link):
         assert str(number) in budget, number  # 84, 48, 132, 140, 144, 8, 12
+    assert "항상 포함" in budget and cover + portfolio + link == 12 and gate + eligibility + 12 == 144  # --ai는 연결 후보를 항상 예산에 넣는다 (이슈 #28)
 
 
 def test_the_usage_task_mapping_in_the_policy_matches_the_code():

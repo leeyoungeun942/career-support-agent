@@ -81,10 +81,10 @@ def usage_rows(env):
     return [json.loads(line) for line in (env.results / "llm_usage.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
-def budget(env, writer_extra=0):
+def budget(env):
     args = type("A", (), {"gate_cases": str(env.gate_cases)})()
     logical, gate_attempts, elig_attempts, judge_calls = ds.gate_ai_budget(args, 6)
-    return judge_calls, (2 + writer_extra) * (1 + MAX_RETRIES)
+    return judge_calls, 3 * (1 + MAX_RETRIES)  # 자소서 + 포트폴리오 + 연결 후보: 무엇이 선택될지 모르므로 연결 후보를 항상 포함한다 (정책 5장)
 
 
 # ---------------------------------------------------------------- 아무것도 보내기 전의 거부
@@ -205,11 +205,16 @@ def test_either_model_being_short_stops_the_run_before_any_call(env, monkeypatch
     assert "시작하지 않았다" in capsys.readouterr().err and log == [] and len(budgets) == 2  # 두 모델을 모두 점검했고 호출은 없다
 
 
-def test_writer_boundary_is_exactly_eight_attempts(env, monkeypatch):
+def test_writer_boundary_is_exactly_twelve_attempts_even_when_the_fixture_links_are_used(env, monkeypatch):
     two_models(env)
     _, writer_calls = budget(env)
-    assert writer_calls == 2 * (1 + MAX_RETRIES) == 8
-    Fake, log, _ = make_fake(left={"m-writer": 8})
+    assert writer_calls == 3 * (1 + MAX_RETRIES) == 12
+    Fake, log, _ = make_fake(left={"m-writer": 11})
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    with pytest.raises(SystemExit) as e:  # 11회만 남았으면 고정본만 쓰는 실행이라도 시작하지 않는다
+        rp.main([*CONSENT, "--postings", str(env.postings), "--gate-cases", str(env.gate_cases)])
+    assert e.value.code == 2 and log == []
+    Fake, log, _ = make_fake(left={"m-writer": 12})
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 0
 
@@ -225,12 +230,11 @@ def test_no_automatic_fallback_a_failed_writer_call_is_not_retried_on_the_judge_
     assert "[6] 자기소개서: 실패" in cap.out and "[7] 포트폴리오: 완료" in cap.out and "SECRET-DETAIL" not in cap.out + cap.err
 
 
-def test_ai_task_links_use_the_writer_model_and_add_one_attempt_budget(env, monkeypatch):
+def test_ai_task_links_use_the_writer_model(env, monkeypatch):
     two_models(env)
     Fake, log, budgets = make_fake()
     monkeypatch.setattr(rp, "GeminiClient", Fake)
-    _, writer_calls = budget(env, writer_extra=1)
-    assert writer_calls == 3 * (1 + MAX_RETRIES) == 12
+    _, writer_calls = budget(env)
     assert run(env, "--task-links", "ai") == 0
     assert ("m-writer", writer_calls) in budgets
     assert [(m, s) for m, s, _ in log if s == "link_tasks"] == [("m-writer", "link_tasks")]
@@ -253,7 +257,7 @@ def test_a_gate_failure_of_sample_3_stops_the_demo_without_calling_the_writer(en
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     assert run(env) == 4
     out = capsys.readouterr().out
-    assert "[4] 선택 공고: - - 공고 선택: 실패 (no_candidate)" in out
+    assert "[4] 선택 공고: - - 공고 선택: 실패 (invalid_input)" in out  # sample-3은 후보가 아니라 입력한 3번이 거절된다(다른 공고로 바꾸지 않는다)
     assert not any(s.startswith("write_") for _, s, _ in log)
     assert "sample-3" not in [line for line in out.splitlines() if line.startswith("순위")] and (env.results / "pipeline").exists()  # 순위 결과는 저장돼 있다
     assert not (env.results / "drafts").exists()
@@ -433,11 +437,11 @@ def test_the_candidate_list_is_shown_and_wrong_answers_are_asked_again(env, monk
     assert "[4] 공고 선택: 완료 (sample-1)" in out
 
 
-def test_with_the_fixture_default_only_sample_3_can_be_chosen_in_ai_mode(env, monkeypatch, capsys, typed):
+def test_with_the_fixture_chosen_only_sample_3_can_be_picked_in_ai_mode(env, monkeypatch, capsys, typed):
     Fake, log, _ = make_fake()
     monkeypatch.setattr(rp, "GeminiClient", Fake)
     typed.answers = ["1", "3"]
-    assert run(env) == 0
+    assert run(env, "--task-links", "fixture") == 0
     out = capsys.readouterr().out
     assert "연결 후보 고정본은 sample-3에만 있어" in out and "[4] 공고 선택: 완료 (sample-3)" in out and len(typed.prompts) == 2
 
@@ -457,3 +461,39 @@ def test_the_selection_prompt_does_not_touch_the_network_or_the_usage_log_before
     assert run(env) == 4
     assert calls_at_prompt and calls_at_prompt[0] > 0  # 평가 호출이 모두 끝난 뒤에 묻는다
     assert not any(s.startswith("write_") for _, s, _ in log) and original is not None
+
+
+# ---------------------------------------------------------------- 연결 후보의 기본(자동): sample-3은 고정본, 그 외 공고는 AI (정책 2장, 5장)
+
+def test_auto_task_links_use_the_fixture_for_sample_3_and_no_link_call(env, monkeypatch):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    assert run(env) == 0
+    assert "link_tasks" not in [s for _, s, _ in log]
+
+
+def test_auto_task_links_ask_the_writer_model_for_another_job(env, monkeypatch, typed):
+    two_models(env)
+    Fake, log, _ = make_fake({"link_tasks": LLMStageError("x")})  # sample-1의 연결 후보 응답은 준비돼 있지 않다
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1"]
+    assert run(env) == 1
+    assert [(m, s, j) for m, s, j in log if s == "link_tasks"] == [("m-writer", "link_tasks", "sample-1")]  # WRITER 모델이 선택 공고의 연결 후보를 만든다
+    assert not any(s.startswith("write_") for _, s, _ in log)  # 연결 후보가 실패하면 초안을 만들지 않는다
+
+
+def test_an_explicit_none_gives_no_link_call_for_any_job(env, monkeypatch, typed):
+    Fake, log, _ = make_fake({"write_cover_letter": LLMStageError("x"), "write_portfolio": LLMStageError("x")})
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    typed.answers = ["1"]
+    run(env, "--task-links", "none")
+    assert "link_tasks" not in [s for _, s, _ in log]
+
+
+def test_the_notice_names_twelve_writer_attempts_and_the_new_total(env, monkeypatch, capsys):
+    Fake, log, _ = make_fake()
+    monkeypatch.setattr(rp, "GeminiClient", Fake)
+    run(env)
+    judge_calls, writer_calls = budget(env)
+    out = capsys.readouterr().out
+    assert f"WRITER {writer_calls}회" in out and f"합계 {judge_calls + writer_calls}회" in out and writer_calls == 12
