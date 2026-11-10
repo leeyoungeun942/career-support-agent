@@ -1,4 +1,5 @@
 """tools/run_presentation.py의 mock dry-run (정책 presentation.md 3·4·6장; 이슈 #24). 네트워크를 쓰지 않는다."""
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -331,16 +332,39 @@ def test_a_defect_in_a_judge_stage_is_not_hidden_as_a_selection_failure(rdir):
         rp.execute(plan)
 
 
-def test_progress_lines_come_one_per_stage_start_and_end_without_changing_the_result():
+def test_progress_lines_come_one_per_stage_start_and_end_without_changing_the_result(tmp_path):
     lines = []
-    plan = rp.build_mock_plan(rp.build_parser().parse_args([]))
-    with_progress = rp.execute(plan, lines.append)
-    plain = rp.execute(rp.build_mock_plan(rp.build_parser().parse_args([])))
-    assert [l.split(":")[0] for l in lines] == ["[1~3] 직무 게이트·자격요건·순위", "[1~3] 직무 게이트·자격요건·순위", "[저장] 결과 저장·재검증", "[4] 공고 선택",
-                                                "[5] WriterInput 안전 분류", "[6] 자기소개서", "[6] 자기소개서", "[7] 포트폴리오", "[7] 포트폴리오"]
+    missing = ["--gate-cases", str(tmp_path / "none.json")]  # 게이트 입력 파일이 없으면 주입된 게이트라 공고별 게이트 줄이 없다 (정책 3-1)
+    with_progress = rp.execute(plan_for(*missing), lines.append)
+    plain = rp.execute(plan_for(*missing))
+    assert [l.split(":")[0] for l in lines if " 게이트 " not in l and " 자격요건 " not in l] == [
+        "[1~3] 직무 게이트·자격요건·순위", "[1~3] 직무 게이트·자격요건·순위", "[저장] 결과 저장·재검증", "[4] 공고 선택",
+        "[5] WriterInput 안전 분류", "[6] 자기소개서", "[6] 자기소개서", "[7] 포트폴리오", "[7] 포트폴리오"]
     assert lines[0].endswith("공고 6건") and "수 분" not in lines[0]  # mock은 기다리지 않는다
     assert {n: s.status for n, s in with_progress.steps.items()} == {n: s.status for n, s in plain.steps.items()}
     assert with_progress.exit_code == plain.exit_code == 0
+
+
+def test_per_job_progress_lines_show_the_stage_the_count_the_job_and_the_state(tmp_path):
+    from test_run_demo import write_gate_cases
+    cases = write_gate_cases(tmp_path / "gate_cases.json")
+    lines = []
+    rp.execute(plan_for("--gate-cases", str(cases)), lines.append)
+    per_job = [l for l in lines if l.startswith("[1~3] 게이트 ") or l.startswith("[1~3] 자격요건 ")]
+    assert per_job == [f"[1~3] {stage} {n}/6: sample-{n} (완료)" for stage in ("게이트", "자격요건") for n in range(1, 7)]
+    lines.clear()
+    rp.execute(plan_for("--gate-cases", str(tmp_path / "none.json")), lines.append)
+    assert [l for l in lines if l.startswith("[1~3] 게이트 ")] == []  # 주입된 게이트에는 게이트 줄이 없다
+    assert len([l for l in lines if l.startswith("[1~3] 자격요건 ")]) == 6
+
+
+def test_a_failed_and_a_not_run_job_are_shown_with_their_states(tmp_path):
+    plan = plan_for("--gate-cases", str(tmp_path / "none.json"))
+    plan.evidence_client = Wrap(plan.evidence_client, {("find_evidence", "sample-4"): LLMQuotaExceeded("한도")})
+    lines = []
+    rp.execute(plan, lines.append)
+    assert [l for l in lines if l.startswith("[1~3] 자격요건 ")][3:] == [
+        "[1~3] 자격요건 4/6: sample-4 (실패)", "[1~3] 자격요건 5/6: sample-5 (안 함)", "[1~3] 자격요건 6/6: sample-6 (안 함)"]
 
 
 def test_main_prints_progress_before_the_summary_and_not_in_quiet_mode(capsys):
@@ -351,3 +375,17 @@ def test_main_prints_progress_before_the_summary_and_not_in_quiet_mode(capsys):
     with pytest.raises(SystemExit):
         rp.main(["-q"])
     assert "시작" not in capsys.readouterr().out
+
+
+def test_per_job_progress_lines_hold_only_ids_counts_and_states_and_are_off_with_quiet(tmp_path, capsys):
+    from test_run_demo import write_gate_cases
+    cases = write_gate_cases(tmp_path / "gate_cases.json")
+    lines = []
+    rp.execute(plan_for("--gate-cases", str(cases)), lines.append)
+    per_job = [l for l in lines if l.startswith("[1~3] 게이트 ") or l.startswith("[1~3] 자격요건 ")]
+    assert per_job and all(re.fullmatch(r"\[1~3\] (게이트|자격요건) \d/6: sample-\d \((완료|실패|안 함)\)", l) for l in per_job)
+    assert main("--gate-cases", str(cases)) == 0
+    out = capsys.readouterr().out
+    assert "[1~3] 게이트 1/6" in out and out.index("[1~3] 자격요건 6/6") < out.index("=== Career Support Agent")  # 요약보다 먼저 나온다
+    assert main("-q", "--gate-cases", str(cases)) == 0
+    assert "게이트 1/6" not in capsys.readouterr().out

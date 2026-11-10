@@ -240,7 +240,8 @@ def execute(plan: Plan, progress=None) -> PresentationResult:
     wait = " (수 분 걸릴 수 있음)" if plan.external else ""
     progress(f"[1~3] 직무 게이트·자격요건·순위: 시작, 공고 {len(plan.jobs)}건{wait}")
     run = run_pipeline(plan.jobs, plan.profile, PROFILE_REF, plan.extract_client, plan.evidence_client, desired_family=plan.desired_family,
-                       gate_client=plan.gate_client, allow_external_profile=plan.external, usage=plan.usage, cache_mode=plan.cache_mode)
+                       gate_client=plan.gate_client, allow_external_profile=plan.external, usage=plan.usage, cache_mode=plan.cache_mode,
+                       on_progress=lambda stage, done, total, job_id, status: progress(f"[1~3] {PROGRESS_STAGE[stage]} {done}/{total}: {job_id} ({STATUS_TEXT[status]})"))
     steps["pipeline"].status = "completed"
     result.pipeline_run = run
     progress(f"[1~3] 직무 게이트·자격요건·순위: 완료 (완료 {run.counts['completed']}, 실패 {run.counts['failed']}, 안 함 {run.counts['not_run']})")
@@ -293,6 +294,7 @@ def execute(plan: Plan, progress=None) -> PresentationResult:
 
 # ---------------------------------------------------------------- 화면
 
+PROGRESS_STAGE = {"gate": "게이트", "eligibility": "자격요건"}  # 정책 presentation.md 3-1, 8장의 공고별 진행 줄
 STATUS_TEXT = {"completed": "완료", "failed": "실패", "not_run": "안 함"}
 STEP_TEXT = {"pipeline": "게이트·자격요건·순위", "persistence": "결과 저장·재검증", "selection": "공고 선택", "writer_input": "초안 입력(WriterInput)",
              "cover_letter": "자기소개서", "portfolio": "포트폴리오"}
