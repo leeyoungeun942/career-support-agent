@@ -11,6 +11,7 @@ import json
 from pydantic import BaseModel
 
 from agents.profile_analyzer import profile_payload
+from core.privacy import reject_contact_info
 from core.llm_client import LLMClient, LLMRequest, LLMStageError
 from core.prompts import fill, load_prompt
 from core.rules_ai import evidence_problem
@@ -81,6 +82,8 @@ def link_tasks(profile: EligibilityProfile, tasks: list[str], client: LLMClient,
     version, body = load_prompt(STAGE)
     experiences = [{"experience_id": x["id"], **{k: v for k, v in x.items() if k in ("title", "role", "actions", "tools", "result")}}
                    for x in profile_payload(profile)["experiences"]]
+    if external:
+        reject_contact_info(experiences)  # 보내기 직전에 보낼 문장을 검사한다 (정책 eligibility.md 16장)
     prompt = fill(
         body,
         tasks=json.dumps([{"task_index": i + 1, "text": t} for i, t in enumerate(tasks)], ensure_ascii=False, indent=1),

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from core import rules
 from core.llm_client import LLMClient, LLMRequest, LLMStageError
+from core.privacy import reject_contact_info
 from core.prompts import fill, load_prompt
 from core.schemas import EligibilityProfile, JobRequirement, NeedsCheckReason, NotMetReason, RequirementStatus
 
@@ -79,8 +80,11 @@ def find_evidence(
     외부로 나가는 클라이언트에는 allow_external_profile=True를 명시해야 프로필을 보낸다. 기본은 PermissionError (정책 16장).
     통신 실패, 스키마 위반, 요건 누락·중복은 LLMStageError다. 확인하지 못한 요건을 조용히 needs_check로 채우지 않는다.
     """
-    if getattr(client, "external", True) and not allow_external_profile:
+    external = getattr(client, "external", True)
+    if external and not allow_external_profile:
         raise PermissionError("외부 LLM으로 프로필을 보내려면 allow_external_profile=True를 명시해야 한다 (정책 16장)")
+    if external:
+        reject_contact_info(profile_payload(profile))  # 문장 칸 안의 연락처 형식은 칸 이름 기준 제외로 걸러지지 않는다
     targets = _targets(requirements)
     if not targets:
         return {}

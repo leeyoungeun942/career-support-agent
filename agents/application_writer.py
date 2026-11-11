@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from core.llm_client import LLMClient, LLMRequest, MockClient
+from core.privacy import reject_contact_info
 from core.prompts import fill, load_prompt
 from core.writer_input import TaskLink, ToConfirm, UsableFact, WriterInput
 
@@ -242,6 +243,8 @@ def write_application(wi: WriterInput, client: LLMClient, kind: str, allow_exter
         raise PermissionError("외부 LLM으로 프로필을 보내려면 allow_external_profile=True를 명시해야 한다 (정책 5장)")
     if external and not wi.meta.is_synthetic:
         raise PermissionError("가상이 아닌 프로필은 외부 LLM으로 보내지 않는다 (정책 5장)")
+    if external:  # 프로필에서 온 문장(사실의 문장, 근거 인용, 인용된 경험)에 연락처 형식이 있으면 보내기 전에 멈춘다 (정책 eligibility.md 16장)
+        reject_contact_info([f.model_dump(mode="json", include={"text", "evidence", "evidence_detail"}) for f in wi.usable_facts], "초안 입력")
     if not wi.usable_facts:
         raise DraftError("no_usable_facts", "쓸 수 있는 사실이 없다")
     version, body = load_prompt(STAGE[kind])
